@@ -9,7 +9,14 @@ from typing import Optional
 @dataclass(frozen=True)
 class Session:
     """A verified interactive identity (from ``complete_login`` / ``verify_session``). All fields
-    mandatory; providers without orgs set ``org_id=""``. The tokens are opaque to Hermes."""
+    mandatory; providers without orgs set ``org_id=""``. The tokens are opaque to Hermes.
+
+    ``role`` defaults to ``"admin"``: every dashboard login today is the single operator account,
+    so any ``Session(...)`` constructed before agent-scoped logins existed is correctly an admin.
+    Agent profiles are NOT expected to hold a dashboard ``Session`` at all — they authenticate as
+    :class:`TokenPrincipal` instead (see ``hermes_cli/agent_permissions.py``); a non-admin
+    ``Session`` would only appear if that changes in the future, and route handlers that need
+    admin-only access MUST check this field (``hermes_cli/dashboard_auth/routes.py::_require_admin``)."""
     user_id: str
     email: str
     display_name: str
@@ -18,6 +25,7 @@ class Session:
     expires_at: int  # unix seconds; the access_token's exp claim
     access_token: str
     refresh_token: str
+    role: str = "admin"
 
 
 @dataclass(frozen=True)

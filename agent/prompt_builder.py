@@ -1536,6 +1536,19 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
         return None
 
 
+def save_soul_md(content: str, home_override: "Path | None" = None) -> None:
+    """Overwrite SOUL.md under HERMES_HOME (or *home_override*'s home) atomically.
+
+    Symmetric with :func:`load_soul_md`: same home-resolution rule (an explicit override pins the
+    profile whose identity is being edited, rather than trusting the ambient HERMES_HOME context,
+    for the same reason load_soul_md takes one — see #50233). Callers that gate who may call this
+    (skills-policy checks, approval flows) do so before calling; this function itself performs no
+    authorization check, matching every other raw file writer in this module."""
+    from utils import atomic_write_text
+    soul_path = (Path(home_override) if home_override is not None else get_hermes_home()) / "SOUL.md"
+    atomic_write_text(soul_path, content)
+
+
 def _read_context_file(path: Path) -> str:
     """Stripped text of *path*; "" when missing, empty or unreadable (logged at debug)."""
     if not path.exists():

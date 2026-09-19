@@ -116,6 +116,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms import api_server_agent_admin as _agent_admin
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
@@ -1113,6 +1114,17 @@ def _room_grant_delegate(name: str):
     return _handler
 
 
+def _agent_admin_delegate(name: str):
+    """Adapter method forwarding to ``api_server_agent_admin.<name>`` (call-time lookup, same
+    pattern as ``_room_grant_delegate``). These routes resolve the active profile ambiently via
+    ``get_hermes_home()``/``load_agent_permissions()`` inside the request's ``_profile_scope``
+    (set by ``profile_prefix_middleware``), so no ``_api_request_profile`` binding is needed here."""
+    async def _handler(self, request: "web.Request") -> "web.Response":
+        return await getattr(_agent_admin, name)(self, request, _openai_error=_openai_error)
+    _handler.__name__ = name
+    return _handler
+
+
 def _run_route_delegate(name: str):
     """Adapter method forwarding to ``api_server_runs.<name>`` (call-time lookup) with this
     module's namespace as ``_api_server``."""
@@ -1581,6 +1593,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        routes.extend(_agent_admin._http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -3864,6 +3877,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_room_member_capabilities = _room_grant_delegate("_handle_room_member_capabilities")
     _handle_room_member_grant_refresh = _room_grant_delegate("_handle_room_member_grant_refresh")
     _handle_room_member_grant_revoke = _room_grant_delegate("_handle_room_member_grant_revoke")
+
+    _handle_agent_get_soul = _agent_admin_delegate("_handle_agent_get_soul")
+    _handle_agent_put_soul = _agent_admin_delegate("_handle_agent_put_soul")
+    _handle_agent_get_personality = _agent_admin_delegate("_handle_agent_get_personality")
+    _handle_agent_put_personality = _agent_admin_delegate("_handle_agent_put_personality")
+    _handle_agent_get_skills = _agent_admin_delegate("_handle_agent_get_skills")
+    _handle_agent_post_skills = _agent_admin_delegate("_handle_agent_post_skills")
 
     def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
         return _api_runs._durable_run_status(self, request, run_id)

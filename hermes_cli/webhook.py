@@ -178,6 +178,19 @@ def _cmd_subscribe(args):
         route["script"] = script
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
+
+    from hermes_cli.agent_permissions import load_agent_permissions
+    from hermes_cli.profiles import get_profile_dir
+    perms = load_agent_permissions(get_profile_dir(profile), profile_name=profile)
+    if not perms.webhooks.can_manage:
+        print(f"Error: profile '{profile}' is not permitted to manage webhooks (ask an admin).")
+        return
+    if not is_update:
+        current_count = sum(1 for s in subs.values() if s.get("profile", "default") == profile)
+        if current_count >= perms.webhooks.max:
+            print(f"Error: profile '{profile}' has reached its webhook limit ({perms.webhooks.max}).")
+            return
+
     subs[name] = route
     _save_subscriptions(subs)
 

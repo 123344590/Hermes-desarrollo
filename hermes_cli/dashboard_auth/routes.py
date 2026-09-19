@@ -446,13 +446,26 @@ def _require_session(request: Request):
     return sess
 
 
+def _require_admin(request: Request):
+    """Like :func:`_require_session`, but 403s unless the caller's role is ``"admin"``. Every
+    ``/api/admin/*`` route (agent-profile creation, permission edits) MUST open with this — agent
+    profiles never hold a dashboard session (see ``Session.role`` docstring), so in practice this
+    only ever admits the single operator account, but the explicit check keeps that invariant
+    enforced in code rather than by convention alone."""
+    sess = _require_session(request)
+    if sess.role != "admin":
+        raise _http(403, "Admin role required")
+    return sess
+
+
 @router.get("/api/auth/me", name="auth_me")
 async def api_auth_me(request: Request):
     """Return the verified session as JSON. Auth-required (gate enforces)."""
     sess = _require_session(request)
     return {
         "user_id": sess.user_id, "email": sess.email, "display_name": sess.display_name,
-        "org_id": sess.org_id, "provider": sess.provider, "expires_at": sess.expires_at}
+        "org_id": sess.org_id, "provider": sess.provider, "expires_at": sess.expires_at,
+        "role": sess.role}
 
 
 @router.post("/api/auth/ws-ticket", name="auth_ws_ticket")

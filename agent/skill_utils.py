@@ -275,18 +275,46 @@ def _home_relative(p: Path) -> Path:
 ESSENTIAL_SKILLS: frozenset = frozenset({"hermes-agent"})
 
 
+def _skill_name_from_index_file(skill_file: Path) -> str:
+    """Skill name for a ``SKILL.md`` path: its containing directory's name."""
+    return skill_file.parent.name
+
+
+def _all_known_skill_names() -> Set[str]:
+    """Every skill name resolvable across the local/create/external skill dirs (not project or
+    org-mirror dirs — those are separately trust-gated, see ``get_project_skills_dirs``)."""
+    names: Set[str] = set()
+    for skills_dir in get_all_skills_dirs():
+        if not skills_dir.is_dir():
+            continue
+        for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
+            names.add(_skill_name_from_index_file(skill_file))
+    return names
+
+
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     """Disabled skill names from config.yaml: global list ∪ platform list
-    (*platform* defaults to ``HERMES_PLATFORM`` / ``HERMES_SESSION_PLATFORM``)."""
+    (*platform* defaults to ``HERMES_PLATFORM`` / ``HERMES_SESSION_PLATFORM``), plus — when the
+    profile's admin-granted permissions declare an execute allowlist (``skills.allowed`` in
+    ``permissions.yaml``, see ``hermes_cli/agent_permissions.py``) — every skill NOT on that
+    allowlist. An agent with no allowlist configured (the common case: profiles without
+    ``permissions.yaml``, or the admin's own ``default`` profile) is unaffected by this — the
+    allowlist only ever narrows, never widens, what ``disabled`` already excluded."""
     skills_cfg = _skills_cfg()
-    if skills_cfg is None:
-        return set()
-    from gateway.session_context import get_session_env
-    resolved_platform = platform or os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM")
-    disabled = _normalize_string_set(skills_cfg.get("disabled"))
-    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get(resolved_platform) if resolved_platform else None
-    if platform_disabled is not None:
-        disabled |= _normalize_string_set(platform_disabled)
+    disabled = set()
+    if skills_cfg is not None:
+        from gateway.session_context import get_session_env
+        resolved_platform = platform or os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM")
+        disabled = _normalize_string_set(skills_cfg.get("disabled"))
+        platform_disabled = (skills_cfg.get("platform_disabled") or {}).get(resolved_platform) if resolved_platform else None
+        if platform_disabled is not None:
+            disabled |= _normalize_string_set(platform_disabled)
+
+    from hermes_cli.agent_permissions import load_agent_permissions
+    perms = load_agent_permissions()
+    if perms.skills.allowed:
+        disabled |= _all_known_skill_names() - set(perms.skills.allowed)
+
     return disabled - ESSENTIAL_SKILLS
 
 

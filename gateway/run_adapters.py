@@ -1549,10 +1549,45 @@ class GatewayAdapterLifecycleMixin:
     def _create_adapter(self, platform: Platform, config: Any) -> Optional[BasePlatformAdapter]:
         """Create an adapter bound to this runner (every lifecycle path goes through here so
         adapters can resolve inbound profile routes before handlers or connect())."""
+        if not self._channel_permitted(platform):
+            return None
         adapter = self._instantiate_adapter(platform, config)
         if adapter is not None:
             adapter.gateway_runner = self
         return adapter
+
+    def _channel_permitted(self, platform: Platform) -> bool:
+        """Admin-granted channel policy for the profile owning this adapter creation.
+
+        Called from :meth:`_create_adapter`, the single choke point every lifecycle path (initial
+        connect, reconnect, multiplex secondary bring-up) goes through — so this also covers
+        reconnect attempts, not just first connect. ``get_active_profile_name``/
+        ``load_agent_permissions`` both resolve off the current ``HERMES_HOME``, which
+        ``_profile_runtime_scope`` already overrides for secondary-profile adapter creation
+        (``_start_one_profile_adapters``), so this naturally scopes to the right profile in both
+        single-profile and multiplex runs without needing the caller to pass one in explicitly."""
+        from hermes_cli.agent_permissions import load_agent_permissions
+        from hermes_cli.profiles import get_active_profile_name
+        profile_name = get_active_profile_name()
+        perms = load_agent_permissions(profile_name=profile_name)
+        if perms.channels.allowed_platforms and platform.value not in perms.channels.allowed_platforms:
+            logger.warning(
+                "Platform '%s' blocked by admin channel policy for profile '%s'",
+                platform.value, profile_name,
+            )
+            return False
+        if perms.channels.max:
+            active = (
+                self.adapters if profile_name == "default"
+                else (getattr(self, "_profile_adapters", None) or {}).get(profile_name)
+            )
+            if active is not None and len(active) >= perms.channels.max:
+                logger.warning(
+                    "Profile '%s' channel limit (%d) reached; refusing to start '%s'",
+                    profile_name, perms.channels.max, platform.value,
+                )
+                return False
+        return True
 
     def _instantiate_adapter(self, platform: Platform, config: Any) -> Optional[BasePlatformAdapter]:
         """Instantiate the adapter for a platform: plugin registry first, then built-ins."""

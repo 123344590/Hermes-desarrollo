@@ -293,6 +293,42 @@ def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
             f"right now — run `hermes sync propose {name}` to retry.")
 
 
+_POLICY_REQUIRED_FOR_ACTION = {
+    "create": "read_write_create",
+    "edit": "read_write",
+    "patch": "read_write",
+    "write_file": "read_write",
+    "remove_file": "read_write",
+    "delete": "read_write",
+}
+_POLICY_RANK = {"read": 0, "read_write": 1, "read_write_create": 2}
+
+
+def _check_skill_policy(action: str, name: str) -> Optional[Dict[str, Any]]:
+    """Admin-granted skills policy gate (``permissions.yaml`` -> ``skills.policy``): refuses any
+    mutating ``action`` the current profile's policy does not reach. Three cumulative levels —
+    ``read`` (execute only, no writes at all), ``read_write`` (+ edit/patch/delete/write_file/
+    remove_file on EXISTING skills), ``read_write_create`` (+ create new skills). A profile with
+    no ``permissions.yaml`` yet resolves to ``read`` (fail-closed) except the admin's own
+    ``default`` profile, which resolves unrestricted — see ``load_agent_permissions``."""
+    required = _POLICY_REQUIRED_FOR_ACTION.get(action)
+    if required is None:  # unknown action: let the existing "Unknown action" handler answer
+        return None
+    try:
+        from hermes_cli.agent_permissions import load_agent_permissions
+        policy = load_agent_permissions().skills.policy
+    except Exception:
+        logger.debug("skill policy lookup failed for action=%s name=%s", action, name, exc_info=True)
+        return None  # fail open on a lookup error: never let a bug in this gate brick skill_manage
+    if _POLICY_RANK[policy] < _POLICY_RANK[required]:
+        verb = "create" if required == "read_write_create" else "modify"
+        return _refusal(
+            f"This profile's skills policy ('{policy}') does not allow '{action}' on skills — "
+            f"it may only {verb} them with an admin-granted upgrade to '{required}' or higher. "
+            f"Ask an admin to raise this profile's skills.policy.")
+    return None
+
+
 def _org_mirror_write_guard(name: str, skill_path: Path, action: str) -> Optional[Dict[str, Any]]:
     """Org-shared skills are EDITABLE IN PLACE — this only blocks deletion. Edits land in the
     mirror, survive the next org pull (baseline sidecar in skills_sync_client) and reach the org

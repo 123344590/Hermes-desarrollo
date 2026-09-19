@@ -72,6 +72,9 @@ class TestSubscribe:
         profile_dir.mkdir(parents=True)
         (profile_dir / "config.yaml").write_text("{}\n")  # identity marker
 
+        from hermes_cli.agent_permissions import AgentPermissions, WebhookPermissions, write_agent_permissions
+        write_agent_permissions(profile_dir, AgentPermissions(webhooks=WebhookPermissions(can_manage=True, max=5)))
+
         webhook_command(_make_args(
             webhook_action="subscribe", name="notifier", route_profile="compta"
         ))

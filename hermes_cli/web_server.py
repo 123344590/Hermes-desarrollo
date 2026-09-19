@@ -994,8 +994,10 @@ app.include_router(_dashboard_ui_routes.router)
 # routes are always mounted — the gate middleware decides enforcement.
 _mount_plugin_api_routes()
 from hermes_cli.dashboard_auth.routes import router as _dashboard_auth_router  # noqa: E402
+from hermes_cli.dashboard_auth.admin_routes import router as _dashboard_admin_router  # noqa: E402
 
 app.include_router(_dashboard_auth_router)
+app.include_router(_dashboard_admin_router)
 mount_spa(app)
 
 
