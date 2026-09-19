@@ -63,8 +63,14 @@ _ACCESS_FS_READ_WRITE = _ACCESS_FS_READ_ONLY | (
 
 # Read-only system paths a shell/interpreter needs to function at all. Never writable, never the
 # profile's own data — a fixed, minimal allowlist, not derived from the running command.
+# /command and /package: s6-overlay's own binaries (s6-setuidgid, etc.) — without these the
+# hermes-exec-shim.sh wrapper at /opt/hermes/bin/hermes fails with "command not found" instead of
+# running, breaking a permitted agent's ability to use the CLI at all (found live: an agent with
+# webhooks.can_manage=true still couldn't run `hermes webhook subscribe` because the shim's own
+# privilege-check exec target was outside the sandbox — not a security gap since the denied case
+# also failed, but it silently broke the PERMITTED case too).
 _READ_ONLY_SYSTEM_PATHS: tuple[str, ...] = (
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt/hermes",
+    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt/hermes", "/command", "/package",
 )
 _READ_WRITE_SYSTEM_PATHS: tuple[str, ...] = ("/dev/null", "/dev/urandom", "/dev/zero", "/tmp")
 
