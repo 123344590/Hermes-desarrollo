@@ -642,6 +642,33 @@ def _make_run_env(env: dict) -> dict:
                          lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)))
 
 
+def _agent_landlock_preexec_fn():
+    """``preexec_fn`` for a terminal command's ``subprocess.Popen``, or ``None`` when Landlock
+    confinement does not apply here (Windows, unsupported kernel, or the unrestricted admin/
+    ``default`` profile — same exemption ``hermes_cli.agent_permissions`` already uses).
+
+    Resolves the active profile's home HERE, in the parent, before any fork happens: a
+    ``preexec_fn`` runs in the child right after ``fork()``, where the ``HERMES_HOME`` ContextVar
+    override is not reliably re-derivable by code that never touched it there — so the path must
+    be captured now and closed over, not looked up again post-fork.
+    """
+    if _IS_WINDOWS:
+        return None
+    try:
+        from agent.landlock_sandbox import landlock_supported, restrict_to_profile_home_or_warn
+        if not landlock_supported():
+            return None
+        from hermes_cli.profiles import get_active_profile_name
+        from hermes_constants import get_hermes_home
+        if get_active_profile_name() == "default":
+            return None
+        profile_home = get_hermes_home()
+    except Exception:
+        return None
+    import functools
+    return functools.partial(restrict_to_profile_home_or_warn, profile_home)
+
+
 # --- Hermes venv / repo-root detection (module-level, computed once) ---
 # Owned here; read lazily by tools.environments.local_pythonpath (tests patch here).
 # The Electron app prepends the repo root to PYTHONPATH so the backend can ``import
@@ -881,7 +908,7 @@ class LocalEnvironment(BaseEnvironment):
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            start_new_session=True, cwd=self.cwd,
+            start_new_session=True, cwd=self.cwd, preexec_fn=_agent_landlock_preexec_fn(),
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
         if not _IS_WINDOWS:
             with contextlib.suppress(ProcessLookupError):

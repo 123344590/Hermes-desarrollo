@@ -49,11 +49,20 @@ class SkillPermissions:
 
 
 @dataclass(frozen=True)
+class NetworkPermissions:
+    # Empty = no IP restriction (backward compatible with every profile created before this
+    # field existed) — same "empty means unrestricted" convention as ChannelPermissions.
+    # allowed_platforms and SkillPermissions.allowed. Entries are individual IPs or CIDR ranges.
+    allowed_ips: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AgentPermissions:
     """Resolved capabilities for one profile. All defaults are the fail-closed values."""
     webhooks: WebhookPermissions = field(default_factory=WebhookPermissions)
     channels: ChannelPermissions = field(default_factory=ChannelPermissions)
     skills: SkillPermissions = field(default_factory=SkillPermissions)
+    network: NetworkPermissions = field(default_factory=NetworkPermissions)
 
 
 def _unrestricted() -> AgentPermissions:
@@ -61,6 +70,7 @@ def _unrestricted() -> AgentPermissions:
         webhooks=WebhookPermissions(can_manage=True, max=2**31 - 1),
         channels=ChannelPermissions(max=2**31 - 1, allowed_platforms=()),
         skills=SkillPermissions(policy="read_write_create", allowed=()),
+        network=NetworkPermissions(allowed_ips=()),
     )
 
 
@@ -88,10 +98,29 @@ def _coerce_str_tuple(value: Any) -> Tuple[str, ...]:
     return (str(value),)
 
 
+def _coerce_ip_tuple(value: Any) -> Tuple[str, ...]:
+    """Like :func:`_coerce_str_tuple`, but silently drops entries that are not a valid IP address
+    or CIDR range — a hand-edited permissions.yaml with a typo'd entry should not either crash
+    every permission read or silently become "no IP restriction" (empty tuple would mean
+    unrestricted); dropping just the bad entry keeps whatever entries WERE valid enforced.
+    Strict validation (reject the whole write on any invalid entry) belongs in the admin write
+    path (``hermes_cli/dashboard_auth/admin_routes.py``), not here."""
+    import ipaddress
+    result = []
+    for raw in _coerce_str_tuple(value):
+        try:
+            ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            continue
+        result.append(raw)
+    return tuple(result)
+
+
 def _parse_permissions(raw: dict) -> AgentPermissions:
     webhooks_raw = raw.get("webhooks") or {}
     channels_raw = raw.get("channels") or {}
     skills_raw = raw.get("skills") or {}
+    network_raw = raw.get("network") or {}
 
     policy = skills_raw.get("policy", "read")
     if policy not in ("read", "read_write", "read_write_create"):
@@ -109,6 +138,9 @@ def _parse_permissions(raw: dict) -> AgentPermissions:
         skills=SkillPermissions(
             policy=policy,
             allowed=_coerce_str_tuple(skills_raw.get("allowed")),
+        ),
+        network=NetworkPermissions(
+            allowed_ips=_coerce_ip_tuple(network_raw.get("allowed_ips")),
         ),
     )
 
@@ -174,6 +206,7 @@ def _to_raw(perms: AgentPermissions) -> dict:
         "webhooks": {"can_manage": perms.webhooks.can_manage, "max": perms.webhooks.max},
         "channels": {"max": perms.channels.max, "allowed_platforms": list(perms.channels.allowed_platforms)},
         "skills": {"policy": perms.skills.policy, "allowed": list(perms.skills.allowed)},
+        "network": {"allowed_ips": list(perms.network.allowed_ips)},
     }
 
 

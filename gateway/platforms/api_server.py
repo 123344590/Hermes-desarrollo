@@ -1389,10 +1389,53 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                        "code": "gateway_auth_failed"}},
             status=401)
 
+    @staticmethod
+    def _ip_not_allowed_response() -> "web.Response":
+        return web.json_response(
+            {"error": {"message": "This agent's permissions do not allow requests from this IP.",
+                       "type": "gateway_auth_error", "code": "gateway_ip_not_allowed"}},
+            status=403)
+
+    def _check_ip_allowlist(self, request: "web.Request") -> Optional["web.Response"]:
+        """None when the request's source IP is allowed (or the profile has no IP restriction —
+        the common case, admin-granted opt-in like every other AgentPermissions field), else 403.
+        Runs AFTER the Bearer token check in ``_check_auth`` — a bad token still gets a uniform
+        401, never leaking whether the IP restriction was the reason via a different status."""
+        from hermes_cli.agent_permissions import load_agent_permissions
+        perms = load_agent_permissions()
+        if not perms.network.allowed_ips:
+            return None
+        ctx = self._request_audit_context(request)
+        candidate = ctx.get("real_ip") or ctx.get("forwarded_for") or ctx.get("remote") or ctx.get("peer_ip")
+        if not candidate:
+            logger.warning(
+                "API server rejected request: IP allowlist configured but no source IP could be "
+                "resolved; %s", self._request_audit_log_suffix(request))
+            return self._ip_not_allowed_response()
+        # X-Forwarded-For may be a comma-separated chain; the original client is the first hop.
+        candidate = candidate.split(",")[0].strip()
+        import ipaddress
+        try:
+            candidate_ip = ipaddress.ip_address(candidate)
+        except ValueError:
+            logger.warning(
+                "API server rejected request: unparseable source IP %r; %s",
+                candidate, self._request_audit_log_suffix(request))
+            return self._ip_not_allowed_response()
+        for allowed in perms.network.allowed_ips:
+            with suppress(ValueError):
+                if candidate_ip in ipaddress.ip_network(allowed, strict=False):
+                    return None
+        logger.warning(
+            "API server rejected request from disallowed IP %r: %s",
+            candidate, self._request_audit_log_suffix(request))
+        return self._ip_not_allowed_response()
+
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
-        """Validate the Bearer token; None when OK, else a 401. The no-key branch (connect()
-        refuses to start without API_SERVER_KEY) exists for tests/manual wiring on the default
-        listener only; named profiles fail closed rather than inherit the owner's key."""
+        """Validate the Bearer token, then the profile's IP allowlist (if any); None when both
+        pass, else the corresponding error response. The no-key branch (connect() refuses to
+        start without API_SERVER_KEY) exists for tests/manual wiring on the default listener
+        only; named profiles fail closed rather than inherit the owner's key."""
         profile = _api_request_profile.get()
         expected_key = self._expected_api_key()
         if not expected_key:
@@ -1409,7 +1452,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and the
             # token is raw client input — a stray byte must 401, not 500.
             if hmac.compare_digest(token.encode(), expected_key.encode()):
-                return None
+                return self._check_ip_allowlist(request)
         logger.warning("API server rejected invalid API key: %s", self._request_audit_log_suffix(request))
         return self._auth_failed_response()
 

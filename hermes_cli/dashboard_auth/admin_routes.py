@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from hermes_cli.agent_permissions import (
-    AgentPermissions, ChannelPermissions, SkillPermissions, WebhookPermissions,
+    AgentPermissions, ChannelPermissions, NetworkPermissions, SkillPermissions, WebhookPermissions,
     load_agent_permissions, write_agent_permissions)
 from hermes_cli.dashboard_auth.routes import _require_admin
 
@@ -88,6 +88,7 @@ def _permissions_to_json(perms: AgentPermissions) -> dict:
         "webhooks": {"can_manage": perms.webhooks.can_manage, "max": perms.webhooks.max},
         "channels": {"max": perms.channels.max, "allowed_platforms": list(perms.channels.allowed_platforms)},
         "skills": {"policy": perms.skills.policy, "allowed": list(perms.skills.allowed)},
+        "network": {"allowed_ips": list(perms.network.allowed_ips)},
     }
 
 
@@ -159,6 +160,21 @@ class _PermissionsBody(BaseModel):
     channels_allowed_platforms: list[str] = []
     skills_policy: str = "read"
     skills_allowed: list[str] = []
+    network_allowed_ips: list[str] = []
+
+
+def _validate_ip_allowlist(raw_ips: list[str]) -> tuple[str, ...]:
+    """Reject the whole write on any unparseable entry — unlike the tolerant read-path parser in
+    ``agent_permissions._coerce_ip_tuple`` (which drops bad entries from an already-written file
+    rather than crash every read), a write is the one place a typo SHOULD surface immediately to
+    the admin instead of being silently dropped."""
+    import ipaddress
+    for raw in raw_ips:
+        try:
+            ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            raise _http(400, f"'{raw}' is not a valid IP address or CIDR range")
+    return tuple(raw_ips)
 
 
 @router.get("/agents/{name}/permissions", name="admin_get_agent_permissions")
@@ -175,11 +191,13 @@ async def api_admin_put_agent_permissions(request: Request, name: str, body: _Pe
     profile_dir = _resolve_named_profile_dir(name)
     if body.skills_policy not in ("read", "read_write", "read_write_create"):
         raise _http(400, "skills_policy must be one of: read, read_write, read_write_create")
+    allowed_ips = _validate_ip_allowlist(body.network_allowed_ips)
     perms = AgentPermissions(
         webhooks=WebhookPermissions(can_manage=body.webhooks_can_manage, max=max(0, body.webhooks_max)),
         channels=ChannelPermissions(
             max=max(0, body.channels_max), allowed_platforms=tuple(body.channels_allowed_platforms)),
         skills=SkillPermissions(policy=body.skills_policy, allowed=tuple(body.skills_allowed)),
+        network=NetworkPermissions(allowed_ips=allowed_ips),
     )
     write_agent_permissions(profile_dir, perms)
     sess = _require_admin(request)
