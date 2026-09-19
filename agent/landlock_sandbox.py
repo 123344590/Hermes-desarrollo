@@ -28,6 +28,7 @@ import ctypes.util
 import logging
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -72,7 +73,14 @@ _ACCESS_FS_READ_WRITE = _ACCESS_FS_READ_ONLY | (
 _READ_ONLY_SYSTEM_PATHS: tuple[str, ...] = (
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt/hermes", "/command", "/package",
 )
-_READ_WRITE_SYSTEM_PATHS: tuple[str, ...] = ("/dev/null", "/dev/urandom", "/dev/zero", "/tmp")
+# /tmp is DELIBERATELY excluded: it is shared across every profile in this container (all
+# agents run as the same OS user, uid 1000), so granting it read-write turns it into a
+# cross-agent covert channel — confirmed live: one agent wrote a file under /tmp and a
+# DIFFERENT agent's sandboxed process read it back, despite both being confined to separate
+# profile_home directories. Each profile gets its OWN tmp under its own profile_home instead
+# (see restrict_to_profile_home's tmp_subdir handling), which is already covered by the
+# profile_home READ_WRITE rule — no extra rule needed, just TMPDIR/TMP/TEMP pointed there.
+_READ_WRITE_SYSTEM_PATHS: tuple[str, ...] = ("/dev/null", "/dev/urandom", "/dev/zero")
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -197,6 +205,20 @@ def restrict_to_profile_home(
     libc = _get_libc()
     if libc is None:
         raise OSError("libc unavailable for Landlock")
+
+    # Own scoped tmp dir instead of the shared system /tmp (see _READ_WRITE_SYSTEM_PATHS'
+    # comment for why /tmp itself is never granted). Created here, before restrict_self, since
+    # mkdir under profile_home works today (no Landlock rule active yet) but MAKE_DIR would still
+    # be covered by the profile_home rule anyway — created eagerly so a command that never mkdirs
+    # its own tmp still finds one ready. Env vars set here are inherited by the exec() that
+    # follows this preexec_fn, in the same child process.
+    tmp_dir = Path(profile_home) / "cache" / "terminal"
+    with suppress(OSError):
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir_str = str(tmp_dir)
+    for env_var in ("TMPDIR", "TMP", "TEMP"):
+        os.environ[env_var] = tmp_dir_str
+
     ruleset_fd = _create_ruleset(libc)
     try:
         _add_rule(libc, ruleset_fd, str(profile_home), _ACCESS_FS_READ_WRITE)

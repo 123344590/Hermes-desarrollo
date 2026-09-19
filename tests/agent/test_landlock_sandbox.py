@@ -7,8 +7,10 @@ boundary, which a mocked ``libc.syscall`` cannot meaningfully verify.
 from __future__ import annotations
 
 import functools
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -119,6 +121,39 @@ class TestRestrictToProfileHome:
         out, _ = proc.communicate(timeout=10)
         assert proc.returncode != 0
         assert "Permission denied" in out
+
+    def test_shared_system_tmp_is_not_a_cross_agent_covert_channel(self, tmp_path):
+        """Regression: the shared system /tmp used to be granted read-write to every sandboxed
+        process (all agents run as the same OS uid), so one agent's process could write a file
+        under /tmp and a DIFFERENT agent's sandboxed process could read it straight back —
+        confirmed live against a real deployment. Each profile now gets its OWN tmp (under its
+        own profile_home, already covered by that directory's read-write rule) instead of the
+        shared /tmp, and /tmp itself is no longer writable at all from inside the sandbox."""
+        from agent.landlock_sandbox import restrict_to_profile_home_or_warn
+
+        profile_a = tmp_path / "profiles" / "agent-a"
+        profile_b = tmp_path / "profiles" / "agent-b"
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+
+        # Agent A's process must not be able to write to the shared system /tmp at all.
+        marker = f"/tmp/hermes_landlock_test_{os.getpid()}.txt"
+        proc = subprocess.Popen(
+            ["bash", "-c", f"echo leaked > {marker}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            preexec_fn=functools.partial(restrict_to_profile_home_or_warn, profile_a))
+        proc.communicate(timeout=10)
+        assert proc.returncode != 0
+        assert not Path(marker).exists()
+
+        # Agent A CAN use its own scoped tmp (TMPDIR points there; mktemp respects it).
+        proc = subprocess.Popen(
+            ["bash", "-c", "echo TMPDIR=$TMPDIR && mktemp"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            preexec_fn=functools.partial(restrict_to_profile_home_or_warn, profile_a))
+        out, _ = proc.communicate(timeout=10)
+        assert proc.returncode == 0
+        assert str(profile_a / "cache" / "terminal") in out
 
 
 class TestLocalEnvironmentIntegration:
