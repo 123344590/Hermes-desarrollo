@@ -1400,20 +1400,29 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """None when the request's source IP is allowed (or the profile has no IP restriction —
         the common case, admin-granted opt-in like every other AgentPermissions field), else 403.
         Runs AFTER the Bearer token check in ``_check_auth`` — a bad token still gets a uniform
-        401, never leaking whether the IP restriction was the reason via a different status."""
+        401, never leaking whether the IP restriction was the reason via a different status.
+
+        Uses ONLY the real TCP socket peer address (``remote``/``peer_ip``) — NEVER
+        ``X-Forwarded-For``/``X-Real-IP``, which are attacker-controlled request headers, not
+        connection metadata. There is no "trusted reverse proxy" concept configured for this
+        server today (confirmed: no such setting exists anywhere in this codebase), so honoring
+        those headers would let any client bypass the allowlist just by setting a header to an
+        allowed IP — this exact bypass was caught live in testing (#live-security-test, IP
+        allowlist configured to reject a real client, request succeeded anyway by sending
+        ``X-Real-IP: <allowed-ip>``). If a trusted-proxy deployment is added later, THAT feature
+        must introduce an explicit allowlist of proxy addresses allowed to set these headers —
+        trusting them unconditionally is never correct."""
         from hermes_cli.agent_permissions import load_agent_permissions
         perms = load_agent_permissions()
         if not perms.network.allowed_ips:
             return None
         ctx = self._request_audit_context(request)
-        candidate = ctx.get("real_ip") or ctx.get("forwarded_for") or ctx.get("remote") or ctx.get("peer_ip")
+        candidate = ctx.get("remote") or ctx.get("peer_ip")
         if not candidate:
             logger.warning(
                 "API server rejected request: IP allowlist configured but no source IP could be "
                 "resolved; %s", self._request_audit_log_suffix(request))
             return self._ip_not_allowed_response()
-        # X-Forwarded-For may be a comma-separated chain; the original client is the first hop.
-        candidate = candidate.split(",")[0].strip()
         import ipaddress
         try:
             candidate_ip = ipaddress.ip_address(candidate)

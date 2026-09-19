@@ -1,20 +1,26 @@
 """Tests for the per-profile IP allowlist gate in gateway/platforms/api_server.py::_check_auth.
 
-Uses the same real-request harness as test_api_server_agent_admin.py — a real aiohttp TestClient
-against a route registered on the real adapter, with a real Bearer token and real
-AgentPermissions.network.allowed_ips, not a mocked auth layer."""
+Regression coverage for a real bug caught in live security testing against a deployed instance:
+the gate originally trusted ``X-Real-IP``/``X-Forwarded-For`` (attacker-controlled request
+headers) ahead of the real TCP peer address, so any client could bypass the allowlist just by
+setting a header to an allowed IP. Fixed to use ONLY ``remote``/``peer_ip`` (the actual socket
+peer, which a client cannot forge) — this project has no "trusted reverse proxy" concept for the
+api_server, so those headers are never a legitimate signal here. See
+``APIServerAdapter._check_ip_allowlist``'s docstring for the full rationale.
+
+Uses a fake request (same pattern as
+tests/gateway/test_api_server_multiplex_secret_scope.py::TestProfileScopedApiAuthentication) —
+constructing a real socket-backed aiohttp TestClient can't control what IP the connection appears
+to come from (it's always loopback), which is exactly the property under test here."""
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
 
-from agent import secret_scope as ss
 from gateway.config import PlatformConfig
-from gateway.platforms.api_server import APIServerAdapter, _api_request_profile
+from gateway.platforms.api_server import APIServerAdapter
 from hermes_cli.agent_permissions import AgentPermissions, NetworkPermissions, write_agent_permissions
 
 
@@ -22,101 +28,87 @@ def _make_adapter() -> APIServerAdapter:
     return APIServerAdapter(PlatformConfig(enabled=True))
 
 
-def _create_app(adapter: APIServerAdapter) -> web.Application:
-    app = web.Application()
-    app.router.add_get("/v1/agent/soul", adapter._handle_agent_get_soul)
-    return app
-
-
-@pytest.fixture(autouse=True)
-def _reset_multiplex():
-    ss.set_multiplex_active(False)
-    yield
-    ss.set_multiplex_active(False)
+def _fake_request(*, remote: str = "", headers: dict | None = None):
+    """A minimal stand-in for aiohttp's Request, just enough for
+    _request_audit_context/_check_ip_allowlist: .remote, .headers, .transport, .method, .path_qs."""
+    return SimpleNamespace(
+        remote=remote, headers=headers or {}, transport=None, method="GET", path_qs="/test")
 
 
 @pytest.fixture
 def named_profile(tmp_path, monkeypatch):
     profile_home = tmp_path / "profiles" / "crm-support"
     profile_home.mkdir(parents=True)
-    key = "crm-support-api-key-0123456789"
-    (profile_home / ".env").write_text(f"API_SERVER_KEY={key}\n", encoding="utf-8")
-    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda name: profile_home)
-    ss.set_multiplex_active(True)
-    return profile_home, key
-
-
-@asynccontextmanager
-async def _scoped_client(adapter: APIServerAdapter):
-    app = _create_app(adapter)
-    token = _api_request_profile.set("crm-support")
-    try:
-        with adapter._profile_scope("crm-support"):
-            async with TestClient(TestServer(app)) as cli:
-                yield cli
-    finally:
-        _api_request_profile.reset(token)
-
-
-def _auth(key: str) -> dict:
-    return {"Authorization": f"Bearer {key}"}
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: profile_home)
+    return profile_home
 
 
 class TestIpAllowlist:
-    @pytest.mark.asyncio
-    async def test_no_restriction_configured_allows_any_ip(self, named_profile):
-        _home, key = named_profile
+    def test_no_restriction_configured_allows_any_ip(self, named_profile):
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            resp = await cli.get("/v1/agent/soul", headers=_auth(key))
-            assert resp.status == 200
+        assert adapter._check_ip_allowlist(_fake_request(remote="203.0.113.9")) is None
 
-    @pytest.mark.asyncio
-    async def test_disallowed_ip_rejected_with_valid_token(self, named_profile):
-        home, key = named_profile
-        write_agent_permissions(home, AgentPermissions(network=NetworkPermissions(allowed_ips=("203.0.113.0/24",))))
+    def test_disallowed_ip_rejected(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("203.0.113.0/24",))))
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            # X-Real-IP is the highest-priority source _check_ip_allowlist reads.
-            resp = await cli.get("/v1/agent/soul", headers={**_auth(key), "X-Real-IP": "198.51.100.7"})
-            assert resp.status == 403
-            body = await resp.json()
-            assert body["error"]["code"] == "gateway_ip_not_allowed"
+        resp = adapter._check_ip_allowlist(_fake_request(remote="198.51.100.7"))
+        assert resp is not None
+        assert resp.status == 403
 
-    @pytest.mark.asyncio
-    async def test_allowed_single_ip_passes(self, named_profile):
-        home, key = named_profile
-        write_agent_permissions(home, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.7",))))
+    def test_allowed_single_ip_passes(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.7",))))
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            resp = await cli.get("/v1/agent/soul", headers={**_auth(key), "X-Real-IP": "198.51.100.7"})
-            assert resp.status == 200
+        assert adapter._check_ip_allowlist(_fake_request(remote="198.51.100.7")) is None
 
-    @pytest.mark.asyncio
-    async def test_cidr_range_matches(self, named_profile):
-        home, key = named_profile
-        write_agent_permissions(home, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.0/24",))))
+    def test_cidr_range_matches(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.0/24",))))
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            resp = await cli.get("/v1/agent/soul", headers={**_auth(key), "X-Real-IP": "198.51.100.200"})
-            assert resp.status == 200
+        assert adapter._check_ip_allowlist(_fake_request(remote="198.51.100.200")) is None
 
-    @pytest.mark.asyncio
-    async def test_cidr_range_excludes_outside_ip(self, named_profile):
-        home, key = named_profile
-        write_agent_permissions(home, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.0/24",))))
+    def test_cidr_range_excludes_outside_ip(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.0/24",))))
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            resp = await cli.get("/v1/agent/soul", headers={**_auth(key), "X-Real-IP": "203.0.113.9"})
-            assert resp.status == 403
+        resp = adapter._check_ip_allowlist(_fake_request(remote="203.0.113.9"))
+        assert resp is not None
+        assert resp.status == 403
 
-    @pytest.mark.asyncio
-    async def test_invalid_token_still_401s_before_ip_check(self, named_profile):
-        """A bad token must not leak whether the IP restriction would have been the blocker —
-        always the same 401, regardless of AgentPermissions.network."""
-        home, _key = named_profile
-        write_agent_permissions(home, AgentPermissions(network=NetworkPermissions(allowed_ips=("203.0.113.0/24",))))
+    def test_no_resolvable_ip_fails_closed(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.0/24",))))
         adapter = _make_adapter()
-        async with _scoped_client(adapter) as cli:
-            resp = await cli.get("/v1/agent/soul", headers={**_auth("wrong-token"), "X-Real-IP": "198.51.100.7"})
-            assert resp.status == 401
+        resp = adapter._check_ip_allowlist(_fake_request(remote=""))
+        assert resp is not None
+        assert resp.status == 403
+
+
+class TestIpAllowlistIgnoresClientControlledHeaders:
+    """Regression: X-Real-IP / X-Forwarded-For must NEVER be trusted — a client sets its own
+    request headers, so honoring them would let anyone bypass the allowlist entirely."""
+
+    def test_x_real_ip_spoof_does_not_bypass_a_disallowed_real_peer(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("203.0.113.0/24",))))
+        adapter = _make_adapter()
+        # Real socket peer (198.51.100.7) is NOT in the allowlist; the client claims via header
+        # to be 203.0.113.5 (which IS in the allowlist). Must still be rejected.
+        resp = adapter._check_ip_allowlist(_fake_request(
+            remote="198.51.100.7", headers={"X-Real-IP": "203.0.113.5"}))
+        assert resp is not None
+        assert resp.status == 403
+
+    def test_x_forwarded_for_spoof_does_not_bypass_a_disallowed_real_peer(self, named_profile):
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("203.0.113.0/24",))))
+        adapter = _make_adapter()
+        resp = adapter._check_ip_allowlist(_fake_request(
+            remote="198.51.100.7", headers={"X-Forwarded-For": "203.0.113.5"}))
+        assert resp is not None
+        assert resp.status == 403
+
+    def test_spoofed_header_cannot_grant_access_the_real_peer_lacks(self, named_profile):
+        """Same scenario as the live-security-test finding: allowlist configured to reject the
+        real client; request must fail even though the client sends a header claiming an
+        allowed IP."""
+        write_agent_permissions(named_profile, AgentPermissions(network=NetworkPermissions(allowed_ips=("198.51.100.7",))))
+        adapter = _make_adapter()
+        resp = adapter._check_ip_allowlist(_fake_request(
+            remote="203.0.113.9", headers={"X-Real-IP": "198.51.100.7", "X-Forwarded-For": "198.51.100.7"}))
+        assert resp is not None
+        assert resp.status == 403
