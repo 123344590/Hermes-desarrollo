@@ -12,6 +12,7 @@ whole-file overwrite of content this task never saw or that changed since.
 
 import fnmatch
 import os
+from contextlib import suppress
 from pathlib import Path
 
 from agent.file_safety import get_nt_namespace_error
@@ -168,6 +169,42 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     return _check_skills_policy_path(candidates[0])
 
 
+def _is_under_a_skills_root(resolved: str) -> bool:
+    """True when *resolved* falls under any skills root the active profile actually reads
+    from — its own ``skills/``, its ``skill_create_dir``, or an admin-configured
+    ``skills.external_dirs`` entry.
+
+    A literal ``"skills"`` path segment (the fast, config-free check) covers the common case —
+    the profile's own tree and the trusted project dirs (``.hermes/skills``, ``.agents/skills``)
+    both end in that literal — but ``skills.create_dir``/``skills.external_dirs`` are
+    admin-supplied absolute paths with no naming convention at all (the config's own example is
+    ``/shared/team-skills``), so a segment check alone misses them. Falling back to the
+    canonical resolvers closes that gap without a config read on the common path.
+
+    ``get_all_skills_dirs()`` alone is not enough for ``create_dir``: it only includes a
+    configured ``create_dir`` when ``.is_dir()`` is already true, so the FIRST write that
+    creates a brand-new skill there — exactly the case ``skills.policy`` governs — would target
+    a directory that does not exist yet and silently pass. ``get_skill_create_dir()`` is
+    checked directly, without that existence requirement, to close the TOCTOU.
+    """
+    if "skills" in Path(resolved).parts:
+        return True
+    try:
+        from agent.skill_utils import get_all_skills_dirs, get_skill_create_dir
+        target = Path(resolved).resolve()
+        roots = list(get_all_skills_dirs())
+        create_dir = get_skill_create_dir()
+        if create_dir is not None:
+            roots.append(create_dir)
+        for d in roots:
+            with suppress(ValueError, OSError):
+                target.relative_to(d.resolve())
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _check_skills_policy_path(resolved: str) -> str | None:
     """Enforce ``skills.policy`` for writes that land in a skills tree.
 
@@ -181,7 +218,7 @@ def _check_skills_policy_path(resolved: str) -> str | None:
     Creating (target absent) needs ``read_write_create``; modifying an existing skill needs
     ``read_write``. The ``default`` (admin) profile resolves unrestricted and is unaffected.
     """
-    if "skills" not in Path(resolved).parts:
+    if not _is_under_a_skills_root(resolved):
         return None
     try:
         from hermes_cli.agent_permissions import load_agent_permissions

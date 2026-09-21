@@ -224,6 +224,34 @@ def _enforce_worker_task_ownership(tid: str) -> None:
             f"to hand off information to other tasks, or kanban_create to spawn follow-up work.")
 
 
+def _check_own_tasks_only(kb, conn, *task_ids: str) -> None:
+    """For a restricted (non-``default``) profile, every task id given must be assigned to
+    that profile. ``default`` (admin) is exempt and may reference any task.
+
+    Structural counterpart to ``_check_assignee_permitted`` (which stops a restricted profile
+    ASSIGNING work elsewhere) for handlers where neither task id is implicitly "my own task" —
+    ``_enforce_worker_task_ownership`` only compares against ``HERMES_KANBAN_TASK`` and is a
+    no-op for an orchestrator with no active worker task, which every restricted profile with
+    the kanban toolset enabled and nothing currently dispatched to it presents as. Without this,
+    such a profile could reference (e.g. link) two tasks belonging entirely to another agent on
+    the shared board.
+    """
+    from hermes_cli.profiles import get_active_profile_name, normalize_profile_name
+    active = get_active_profile_name() or "default"
+    if active == "default":
+        return
+    active_norm = normalize_profile_name(active)
+    for tid in task_ids:
+        task = kb.get_task(conn, tid)
+        if task is None:
+            continue  # unknown id: let the caller's own validation report that
+        assignee = getattr(task, "assignee", None)
+        if not assignee or normalize_profile_name(str(assignee)) != active_norm:
+            raise _Reject(
+                f"task {tid!r} does not belong to this agent's profile ({active!r}). "
+                f"An agent may only reference its own tasks on the shared board.")
+
+
 def _worker_guard(tool_name: str, args: dict) -> str:
     """Worker mutation preamble, in order: delegate-child rejection, task id
     resolution, task-scope ownership, run-identity proof. Returns the task id.
@@ -243,6 +271,16 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     _reject_delegated_child_mutation(tool_name)
     tid = _require_task_id(args)
     _enforce_worker_task_ownership(tid)
+    # _enforce_worker_task_ownership above is a no-op whenever HERMES_KANBAN_TASK is unset —
+    # by design, for the legitimate "orchestrator routing a child task" case. But a restricted
+    # profile with the kanban toolset enabled and nothing currently dispatched to it presents
+    # exactly the same way, so without this it could mutate/read ANY task on the shared board
+    # by passing a foreign task_id it learned from a comment or a link target. Confirmed live:
+    # kanban_unblock and kanban_link both succeeded against another profile's task before this
+    # existed. Opens its own connection since callers invoke this before their own `with
+    # _board(...)`.
+    with _board(args.get("board")) as (kb, conn):
+        _check_own_tasks_only(kb, conn, tid)
     if (
         tool_name in _RUN_LIFECYCLE_TOOLS
         and os.environ.get("HERMES_KANBAN_TASK")
@@ -604,6 +642,12 @@ def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
+        # kanban_show is a normal (non-orchestrator-only) tool, so any task worker can call
+        # it — and had no ownership check at all: it returns comments and worker_context
+        # (the assignee's recent work), i.e. exactly the cross-profile disclosure
+        # kanban_list's assignee filter exists to prevent, reachable here on any foreign
+        # task_id instead.
+        _check_own_tasks_only(kb, conn, tid)
         task = _existing_task(kb, conn, tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
@@ -874,6 +918,13 @@ def _handle_comment(args: dict, **kw) -> str:
     # with what reads as a system directive. See #19713.
     author = os.environ.get("HERMES_PROFILE") or "worker"
     with _board(args.get("board")) as (kb, conn):
+        # "Cross-task commenting stays unrestricted" (above) means unrestricted ACROSS TASKS
+        # the profile owns — the handoff channel between a job's own subtasks — not across
+        # OTHER PROFILES' tasks on the shared board. Without this, a restricted profile could
+        # plant text in a sibling profile's task thread; build_worker_context injects comments
+        # into the next worker's system prompt verbatim, so that is durable prompt injection
+        # into another agent, not merely a data leak. Confirmed live before this guard existed.
+        _check_own_tasks_only(kb, conn, tid)
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
         return _ok(task_id=tid, comment_id=cid)
 
@@ -968,9 +1019,13 @@ def _handle_attach_url(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_attachments")
 def _handle_attachments(args: dict, **kw) -> str:
-    """List a task's attachments (read-only; no ownership restriction)."""
+    """List a task's attachments."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
+        # Was genuinely unrestricted by design ("no ownership restriction" — fine for a
+        # worker listing its OWN task's attachments, but the check was missing entirely, so
+        # it also listed another profile's attachment filenames/sizes/uploader on request.
+        _check_own_tasks_only(kb, conn, tid)
         _existing_task(kb, conn, tid)
         return json.dumps({
             "ok": True, "task_id": tid,
@@ -1189,6 +1244,12 @@ def _handle_unblock(args: dict, **kw) -> str:
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
     with _board(args.get("board")) as (kb, conn):
+        # _enforce_worker_task_ownership above only compares against HERMES_KANBAN_TASK, and
+        # is a no-op for a restricted profile with the kanban toolset enabled but nothing
+        # currently dispatched to it (the "orchestrator" case it exists to allow) — confirmed
+        # live: crm-locked unblocked crm-support's task with no relation to it. Same fix as
+        # kanban_link.
+        _check_own_tasks_only(kb, conn, tid)
         _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
         return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
 
@@ -1203,6 +1264,14 @@ def _handle_link(args: dict, **kw) -> str:
     child_id = args.get("child_id")
     _check(parent_id and child_id, "both parent_id and child_id are required")
     with _board(args.get("board")) as (kb, conn):
+        # Unlike kanban_complete/block/unblock, neither endpoint here is implicitly "my own
+        # task" (an orchestrator legitimately links two child cards it just created), so
+        # _enforce_worker_task_ownership's env-task comparison doesn't apply. The board is
+        # shared by design, and this handler had NO ownership check at all — a restricted
+        # profile with no active worker task (the "orchestrator" case that check exists for)
+        # could link two tasks belonging entirely to another profile. For a restricted
+        # profile, require both ends to be its own.
+        _check_own_tasks_only(kb, conn, str(parent_id), str(child_id))
         gated = kb.link_tasks(
             conn, parent_id=parent_id, child_id=child_id,
             expected_child_run_id=_worker_run_id(str(child_id)))
