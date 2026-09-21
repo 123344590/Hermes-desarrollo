@@ -88,6 +88,7 @@ const PROFILE_SCOPED_PREFIXES = [
   // cancellation, and disconnect must all follow the selected management
   // profile rather than silently targeting the dashboard process's profile.
   "/api/providers/oauth",
+  "/api/providers/custom-endpoints",
   "/api/model/info",
   "/api/model/set",
   "/api/model/auxiliary",
@@ -586,6 +587,43 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+
+  // Custom OpenAI-compatible provider endpoints (hermes_cli/web_routers/config_env.py).
+  // `validateCustomEndpoint` is a stateless live probe — it never touches config.yaml,
+  // so it takes no profile param (mirrors the backend route, which takes none either).
+  listCustomEndpoints: (profile = getManagementProfile()) =>
+    fetchJSON<CustomEndpointsResponse>(
+      appendProfileParam("/api/providers/custom-endpoints", profile),
+    ),
+  upsertCustomEndpoint: (body: CustomEndpointUpdate, profile = getManagementProfile()) =>
+    fetchJSON<CustomEndpointsResponse>(
+      appendProfileParam("/api/providers/custom-endpoints", profile),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  activateCustomEndpoint: (id: string, profile = getManagementProfile()) =>
+    fetchJSON<{ ok: boolean; provider: string; model: string }>(
+      appendProfileParam(
+        `/api/providers/custom-endpoints/${encodeURIComponent(id)}/activate`,
+        profile,
+      ),
+      { method: "POST" },
+    ),
+  deleteCustomEndpoint: (id: string, profile = getManagementProfile()) =>
+    fetchJSON<CustomEndpointsResponse>(
+      appendProfileParam(`/api/providers/custom-endpoints/${encodeURIComponent(id)}`, profile),
+      { method: "DELETE" },
+    ),
+  validateCustomEndpoint: (body: CustomEndpointUpdate) =>
+    fetchJSON<CustomEndpointValidationResponse>("/api/providers/custom-endpoints/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
   saveConfig: (config: Record<string, unknown>, profile = getManagementProfile()) =>
     fetchJSON<{ ok: boolean }>(appendProfileParam("/api/config", profile), {
       method: "PUT",
@@ -2549,6 +2587,69 @@ export interface AuxiliaryTaskAssignment {
 export interface AuxiliaryModelsResponse {
   tasks: AuxiliaryTaskAssignment[];
   main: { provider: string; model: string };
+}
+
+// Custom OpenAI-compatible provider endpoints (hermes_cli/web_models.py::CustomEndpointUpdate
+// + hermes_cli/web_routers/config_env.py). Shapes mirror apps/desktop/src/types/hermes.ts —
+// same backend contract, adapted to this file's interface style.
+
+/** Transport pinned on a custom endpoint; "" = let the runtime auto-detect. */
+export type CustomEndpointApiMode = "" | "chat_completions" | "codex_responses" | "anthropic_messages";
+
+/** One `/v1/models` row; a gateway may advertise a reasoning alias
+ * (`gpt-5.6-sol-high` -> `gpt-5.6-sol` @ `high`) that the bare id list flattens. */
+export interface CustomEndpointModelDetail {
+  id: string;
+  canonical_model?: string | null;
+  reasoning_effort?: string | null;
+}
+
+export interface CustomEndpoint {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  models: string[];
+  api_mode?: CustomEndpointApiMode;
+  context_length?: number | null;
+  discover_models: boolean;
+  has_api_key: boolean;
+  api_key_preview?: string | null;
+  is_current?: boolean;
+  source?: string;
+}
+
+export interface CustomEndpointsResponse {
+  endpoints: CustomEndpoint[];
+  current: { provider: string; model: string; base_url: string };
+  ok?: boolean;
+  id?: string;
+}
+
+export interface CustomEndpointUpdate {
+  id?: string;
+  name: string;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  api_mode?: CustomEndpointApiMode;
+  context_length?: number;
+  discover_models?: boolean;
+  make_default?: boolean;
+  models?: string[];
+  model_details?: CustomEndpointModelDetail[];
+}
+
+export interface CustomEndpointValidationResponse {
+  ok: boolean;
+  reachable: boolean;
+  message: string;
+  models: string[];
+  /** Older backends send only `models`. */
+  model_details?: CustomEndpointModelDetail[];
+  transport_checked?: CustomEndpointApiMode;
+  /** Base URL that actually served /models (the entered URL or its /v1 variant); persist this one. */
+  resolved_base_url?: string;
 }
 
 export interface MoaModelSlot {

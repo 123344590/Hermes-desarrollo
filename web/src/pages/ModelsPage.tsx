@@ -42,6 +42,7 @@ import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
+import { CustomProvidersPanel } from "@/components/CustomProvidersPanel";
 import { errorMessage } from "@/lib/api-error";
 
 const PERIODS = [
@@ -1250,6 +1251,8 @@ export default function ModelsPage() {
           refreshKey={saveKey}
           onSaved={onAssigned}
         />
+
+        <CustomProvidersPanel />
 
         {data && (
           <Card className="min-w-0 max-w-full overflow-hidden">
