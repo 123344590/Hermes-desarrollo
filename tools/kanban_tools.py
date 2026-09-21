@@ -991,6 +991,33 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         state.close()
 
 
+def _check_assignee_permitted(assignee: str) -> None:
+    """A restricted profile may only assign work to ITSELF.
+
+    The kanban board is shared across profiles by design (``hermes_cli/kanban_db.py``:
+    a per-profile board would break the dispatcher/worker handoff), and the dispatcher
+    spawns the worker as ``hermes -p <assignee>`` with ``HERMES_HOME`` set to that
+    profile's home. So an unchecked ``assignee`` is arbitrary code execution AS ANOTHER
+    AGENT: naming ``default`` runs the caller's payload in the unrestricted admin profile
+    — defeating skills.policy, webhooks, channels and filesystem isolation in one call,
+    with results flowing back through the shared board.
+
+    ``default`` (the admin profile, see ``_UNRESTRICTED_PROFILES``) keeps full
+    orchestration and may fan out to any installed profile; every other profile is
+    confined to its own name. The refusal deliberately does not reveal whether the
+    requested profile exists — that roster is withheld from restricted agents.
+    """
+    from hermes_cli.profiles import get_active_profile_name, normalize_profile_name
+    active = get_active_profile_name() or "default"
+    if active == "default":
+        return
+    if normalize_profile_name(assignee) != normalize_profile_name(active):
+        _check(False,
+               f"assignee must be this agent's own profile ({active!r}). Assigning work to "
+               f"another profile would run it with that agent's permissions; only an admin "
+               f"can fan out across profiles.")
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -999,6 +1026,7 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = args.get("assignee")
     _check(assignee, "assignee is required — name the profile that should execute this "
                      "task (the dispatcher will only spawn tasks with an assignee)")
+    _check_assignee_permitted(assignee)
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing

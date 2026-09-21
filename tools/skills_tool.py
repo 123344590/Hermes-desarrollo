@@ -603,7 +603,13 @@ def skill_view(
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         resolved_name = frontmatter.get("name", skill_md.parent.name)
-        if _is_skill_disabled(resolved_name):
+        # Allowlist-aware delegate, NOT _is_skill_disabled: the latter reads only config.yaml's
+        # disabled lists and ignores the profile's admin-granted skills.allowed, which let a
+        # restricted agent read the full SKILL.md — and, through _serve_skill_file below, that
+        # skill's references/templates/scripts — for any skill outside its allowlist. Reading a
+        # skill's instruction text is equivalent to using it, so this enforces the same boundary
+        # skills_list already applies via _find_all_skills.
+        if resolved_name in _get_disabled_skill_names():
             return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
         if file_path and skill_dir:
             return _serve_skill_file(

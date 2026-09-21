@@ -134,7 +134,10 @@ def _serve_plugin_skill(
     except Exception as e:
         return _fail(f"Failed to read skill '{qualified_name}': {e}")
     parsed_frontmatter = _safe_frontmatter(content=content)
-    if _st._is_skill_disabled(qualified_name):
+    # Allowlist-aware delegate (see the same gate in tools/skills_tool.py::skill_view):
+    # _is_skill_disabled consults only config.yaml and would expose a plugin skill's full
+    # text to a profile whose skills.allowed excludes it.
+    if qualified_name in _st._get_disabled_skill_names():
         return _fail(f"Skill '{qualified_name}' is disabled.")
     if not _st.skill_matches_platform(parsed_frontmatter):
         return _fail(f"Skill '{qualified_name}' is not supported on this platform.",

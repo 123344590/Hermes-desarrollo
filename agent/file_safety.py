@@ -247,7 +247,8 @@ _HERMES_PROTECTED_SUBPATHS = ("state.db", "sessions", "mcp-tokens", "pairing", "
 
 
 def _classify_write_denial(path: str) -> Optional[str]:
-    """Return ``'credential'``, ``'safe_root'``, ``'nt_namespace'``, or ``None`` if writes are allowed."""
+    """Return ``'credential'``, ``'safe_root'``, ``'nt_namespace'``, ``'foreign_profile'``, or
+    ``None`` if writes are allowed."""
     # NT/device-namespace check runs on the RAW string, before realpath():
     # resolving such a path is itself the NTLM-leak trigger, and namespace
     # prefixes defeat string-prefix denylist comparison after normalization.
@@ -277,6 +278,14 @@ def _classify_write_denial(path: str) -> Optional[str]:
     if safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
         return "safe_root"
 
+    # Write-side counterpart of the read guard (_foreign_profile_reason): without it a
+    # restricted agent could not READ a sibling's SOUL.md but could still OVERWRITE it —
+    # durable prompt injection into another agent, and escalation to unrestricted when the
+    # victim is the admin profile. Landlock stops this for the terminal only; these tools
+    # run in-process in the gateway, where no kernel boundary applies.
+    if _foreign_profile_reason(Path(resolved)) is not None:
+        return "foreign_profile"
+
     return None
 
 
@@ -296,6 +305,11 @@ def get_write_denied_error(path: str, *, verb: str = "Write") -> Optional[str]:
         )
     if denial == "nt_namespace":
         return get_nt_namespace_error(path, verb=verb)
+    if denial == "foreign_profile":
+        return (
+            f"{verb} denied: '{path}' belongs to a different agent profile. Each agent may "
+            f"only write under its own profile home."
+        )
     return f"{verb} denied: '{path}' is a protected system/credential file." if denial else None
 
 
