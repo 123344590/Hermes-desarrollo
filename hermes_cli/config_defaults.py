@@ -2161,6 +2161,15 @@ DEFAULT_CONFIG = {
         # HERMES_MEDIA_TRUST_RECENT_SECONDS. Only consulted when strict is true.
         "trust_recent_files_seconds": 600,
         "api_server": {  # OpenAI-compatible API server platform (gateway/platforms/api_server.py).
+            # extra.host/extra.port (bridged from API_SERVER_HOST/API_SERVER_PORT, not declared
+            # here since `extra` is a freeform per-platform dict) are the BIND address/port, which
+            # for a real deployment is routinely 0.0.0.0 — not a URL any external caller (e.g. a
+            # CRM given the dashboard's Agents-page URL) can dial. Set extra.public_host to the
+            # externally-reachable hostname/IP to have the dashboard advertise a reachable URL
+            # instead of falling back to "localhost" (same shape as dashboard.public_url above).
+            # Read by hermes_cli/dashboard_auth/admin_routes.py::_agent_base_url and mirrored by
+            # platforms.webhook.extra.public_host in hermes_cli/webhook.py::_get_webhook_base_url.
+            #
             # Max concurrent agent runs. Requests to /v1/chat/completions, /v1/responses, and
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota
             # exhaustion from a request flood. 0 = no cap.

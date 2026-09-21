@@ -49,6 +49,16 @@ function findButtonByText(text: string): HTMLElement | null {
   );
 }
 
+// The dialog portal renders after the header in DOM order, so its submit button is the LAST
+// match when its label collides with a header action (e.g. "Connect" names both the header's
+// launcher and the Quick Connect dialog's submit button).
+function findLastButtonByText(text: string): HTMLElement | null {
+  const matches = Array.from(document.querySelectorAll("button")).filter(
+    (b) => b.textContent?.trim() === text,
+  );
+  return matches.length ? matches[matches.length - 1] : null;
+}
+
 const ENDPOINT_FIXTURE = {
   id: "my-proxy",
   name: "My Proxy",
@@ -156,6 +166,75 @@ describe("CustomProvidersPanel", () => {
       discover_models: true,
       make_default: false,
       models: ["llama-3-70b"],
+      model_details: undefined,
+    });
+  });
+
+  it("Quick Connect validates in the background and upserts with an auto-derived name and make_default true", async () => {
+    apiMocks.listCustomEndpoints.mockResolvedValue({
+      endpoints: [],
+      current: { provider: "", model: "", base_url: "" },
+    });
+    apiMocks.validateCustomEndpoint.mockResolvedValue({
+      ok: true,
+      reachable: true,
+      message: "",
+      models: ["gpt-4o-mini"],
+      model_details: [],
+      transport_checked: "chat_completions",
+      resolved_base_url: "https://litellm.tecnologiaslan.co/v1",
+    });
+    apiMocks.upsertCustomEndpoint.mockResolvedValue({
+      ok: true,
+      id: "litellm.tecnologiaslan.co",
+      endpoints: [
+        {
+          ...ENDPOINT_FIXTURE,
+          id: "litellm.tecnologiaslan.co",
+          name: "litellm.tecnologiaslan.co",
+          base_url: "https://litellm.tecnologiaslan.co/v1",
+          model: "gpt-4o-mini",
+          models: ["gpt-4o-mini"],
+        },
+      ],
+      current: {
+        provider: "litellm.tecnologiaslan.co",
+        model: "gpt-4o-mini",
+        base_url: "https://litellm.tecnologiaslan.co/v1",
+      },
+    });
+
+    await renderPanel();
+    await waitFor(() => document.body.textContent?.includes("No custom OpenAI-compatible") === true);
+
+    click(findLastButtonByText("Connect"));
+    await waitFor(() => document.querySelector("#qc-base-url") != null);
+
+    setInputValue(
+      document.querySelector<HTMLInputElement>("#qc-base-url"),
+      "https://litellm.tecnologiaslan.co/v1",
+    );
+    setInputValue(document.querySelector<HTMLInputElement>("#qc-token"), "sk-secret-token");
+
+    // No separate "Test connection" affordance in this dialog — Connect both
+    // validates and saves in one step.
+    expect(findButtonByText("Test connection")).toBeNull();
+
+    click(findLastButtonByText("Connect"));
+    await waitFor(() => apiMocks.upsertCustomEndpoint.mock.calls.length > 0);
+
+    expect(apiMocks.validateCustomEndpoint).toHaveBeenCalledTimes(1);
+    expect(apiMocks.upsertCustomEndpoint).toHaveBeenCalledWith({
+      id: undefined,
+      name: "litellm.tecnologiaslan.co",
+      base_url: "https://litellm.tecnologiaslan.co/v1",
+      model: "gpt-4o-mini",
+      api_key: "sk-secret-token",
+      api_mode: "",
+      context_length: undefined,
+      discover_models: true,
+      make_default: true,
+      models: ["gpt-4o-mini"],
       model_details: undefined,
     });
   });

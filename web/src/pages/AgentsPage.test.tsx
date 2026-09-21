@@ -10,7 +10,14 @@ const apiMocks = vi.hoisted(() => ({
   getAgentPermissions: vi.fn(),
   updateAgentPermissions: vi.fn(),
   rotateAgentToken: vi.fn(),
+  getMessagingPlatforms: vi.fn(),
 }));
+
+const PLATFORM_FIXTURE = [
+  { id: "telegram", name: "Telegram" },
+  { id: "discord", name: "Discord" },
+  { id: "whatsapp", name: "WhatsApp" },
+];
 
 vi.mock("@/lib/api", () => ({
   api: apiMocks,
@@ -79,6 +86,11 @@ async function renderAgentsPage() {
 beforeEach(() => {
   for (const fn of Object.values(apiMocks)) fn.mockReset();
   apiMocks.getAgents.mockResolvedValue({ agents: [AGENT_FIXTURE] });
+  apiMocks.getMessagingPlatforms.mockResolvedValue({
+    env_path: "/tmp/.env",
+    gateway_start_command: "hermes gateway run",
+    platforms: PLATFORM_FIXTURE,
+  });
 });
 
 afterEach(async () => {
@@ -139,6 +151,78 @@ describe("AgentsPage", () => {
       skills_allowed: ["web_search"],
       network_allowed_ips: ["10.0.0.0/8"],
     });
+  });
+
+  it("renders a zero-valued max field as empty so typing a digit does not concatenate onto '0'", async () => {
+    apiMocks.getAgents.mockResolvedValue({
+      agents: [
+        {
+          ...AGENT_FIXTURE,
+          name: "zero-bot",
+          permissions: {
+            ...AGENT_FIXTURE.permissions,
+            webhooks: { can_manage: false, max: 0 },
+          },
+        },
+      ],
+    });
+    await renderAgentsPage();
+
+    click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
+    await waitFor(() => document.querySelector("#webhooks-max") != null);
+
+    const webhooksMax = document.querySelector<HTMLInputElement>("#webhooks-max");
+    // The DOM value must be "" (not the literal "0"), or the browser's default
+    // number-input behavior appends the next keystroke onto the visible "0"
+    // and typing "1" produces "01" instead of replacing it.
+    expect(webhooksMax?.value).toBe("");
+
+    setInputValue(webhooksMax, "1");
+    expect(webhooksMax?.value).toBe("1");
+  });
+
+  it("renders the channels-allowed-platforms field as a checkbox multi-select, not free text", async () => {
+    apiMocks.updateAgentPermissions.mockResolvedValue({
+      webhooks: { can_manage: true, max: 3 },
+      channels: { max: 2, allowed_platforms: ["telegram", "discord"] },
+      skills: { policy: "read_write", allowed: ["web_search"] },
+      network: { allowed_ips: ["10.0.0.0/8"] },
+    });
+    await renderAgentsPage();
+
+    click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
+    await waitFor(() => document.querySelector("#channels-platform-telegram") != null);
+
+    // No free-text CSV input for platforms any more.
+    expect(document.querySelector("#channels-platforms")).toBeNull();
+
+    // Telegram is already allowed (checked); Discord is not. Check Discord too.
+    const telegramBox = document.querySelector<HTMLElement>("#channels-platform-telegram");
+    const discordBox = document.querySelector<HTMLElement>("#channels-platform-discord");
+    expect(telegramBox?.getAttribute("data-state")).toBe("checked");
+    expect(discordBox?.getAttribute("data-state")).toBe("unchecked");
+
+    click(discordBox);
+    await waitFor(
+      () => document.querySelector("#channels-platform-discord")?.getAttribute("data-state") === "checked",
+    );
+
+    click(findButtonByText("Save permissions"));
+    await waitFor(() => apiMocks.updateAgentPermissions.mock.calls.length > 0);
+
+    const [, body] = apiMocks.updateAgentPermissions.mock.calls[0] as [string, { channels_allowed_platforms: string[] }];
+    expect(body.channels_allowed_platforms).toEqual(["telegram", "discord"]);
+  });
+
+  it("labels the network-allowed-ips field as restricting inbound CRM access, not outbound", async () => {
+    await renderAgentsPage();
+
+    click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
+    await waitFor(() => document.querySelector("#network-ips") != null);
+
+    const label = document.querySelector('label[for="network-ips"]');
+    expect(label?.textContent ?? "").toMatch(/incoming|inbound/i);
+    expect(label?.textContent ?? "").not.toMatch(/outbound/i);
   });
 });
 

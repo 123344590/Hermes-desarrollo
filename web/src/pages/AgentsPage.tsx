@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
+import { Checkbox } from "@nous-research/ui/ui/components/checkbox";
 import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
@@ -21,7 +22,7 @@ import { Toast } from "@nous-research/ui/ui/components/toast";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { useModalBehavior } from "@/hooks/useModalBehavior";
 import { api } from "@/lib/api";
-import type { AdminAgentInfo, AgentPermissionsUpdate } from "@/lib/api";
+import type { AdminAgentInfo, AgentPermissionsUpdate, MessagingPlatform } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { cn, themedBody } from "@/lib/utils";
@@ -84,6 +85,33 @@ function TokenReveal({
   );
 }
 
+/** A non-negative integer <Input type="number">. Renders 0 as an EMPTY field rather than the
+ * literal "0" — a controlled `value={0}` makes the browser append keystrokes onto the visible
+ * "0" (typing "1" produces "01") instead of replacing it. Parsing tolerates the empty string
+ * (treated as 0) so the field can be fully cleared while editing. */
+function NonNegativeIntInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <Input
+      id={id}
+      type="number"
+      min={0}
+      value={value === 0 ? "" : value}
+      onChange={(e) => {
+        const raw = e.target.value;
+        onChange(raw === "" ? 0 : Math.max(0, Math.trunc(Number(raw)) || 0));
+      }}
+    />
+  );
+}
+
 function CopyIconButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
@@ -124,6 +152,7 @@ function permissionsToDraft(agent: AdminAgentInfo): AgentPermissionsUpdate {
 interface PermissionsEditorProps {
   draft: AgentPermissionsUpdate;
   saving: boolean;
+  availablePlatforms: MessagingPlatform[];
   onCancel: () => void;
   onChange: (next: AgentPermissionsUpdate) => void;
   onSave: () => void;
@@ -131,23 +160,33 @@ interface PermissionsEditorProps {
 
 /** Inline editor for one agent's AgentPermissions — the shape PUT
  * /api/admin/agents/{name}/permissions accepts (admin_routes.py::_PermissionsBody). */
-function PermissionsEditor({ draft, saving, onCancel, onChange, onSave }: PermissionsEditorProps) {
+function PermissionsEditor({
+  draft,
+  saving,
+  availablePlatforms,
+  onCancel,
+  onChange,
+  onSave,
+}: PermissionsEditorProps) {
   const csvToList = (v: string) =>
     v.split(",").map((s) => s.trim()).filter(Boolean);
+
+  const togglePlatform = (id: string, checked: boolean) => {
+    const next = checked
+      ? [...draft.channels_allowed_platforms, id]
+      : draft.channels_allowed_platforms.filter((p) => p !== id);
+    onChange({ ...draft, channels_allowed_platforms: next });
+  };
 
   return (
     <div className="grid gap-4 border-t border-border pt-4 mt-2">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="grid gap-2">
           <Label htmlFor="webhooks-max">Webhooks — max subscriptions</Label>
-          <Input
+          <NonNegativeIntInput
             id="webhooks-max"
-            type="number"
-            min={0}
             value={draft.webhooks_max}
-            onChange={(e) =>
-              onChange({ ...draft, webhooks_max: Math.max(0, Number(e.target.value) || 0) })
-            }
+            onChange={(webhooks_max) => onChange({ ...draft, webhooks_max })}
           />
         </div>
 
@@ -171,27 +210,40 @@ function PermissionsEditor({ draft, saving, onCancel, onChange, onSave }: Permis
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="grid gap-2">
           <Label htmlFor="channels-max">Channels — max connected</Label>
-          <Input
+          <NonNegativeIntInput
             id="channels-max"
-            type="number"
-            min={0}
             value={draft.channels_max}
-            onChange={(e) =>
-              onChange({ ...draft, channels_max: Math.max(0, Number(e.target.value) || 0) })
-            }
+            onChange={(channels_max) => onChange({ ...draft, channels_max })}
           />
         </div>
 
         <div className="grid gap-2">
-          <Label htmlFor="channels-platforms">Channels — allowed platforms</Label>
-          <Input
-            id="channels-platforms"
-            placeholder="comma-separated, e.g. telegram,discord"
-            value={draft.channels_allowed_platforms.join(", ")}
-            onChange={(e) =>
-              onChange({ ...draft, channels_allowed_platforms: csvToList(e.target.value) })
-            }
-          />
+          <Label id="channels-platforms-label">Channels — allowed platforms</Label>
+          <div
+            className="grid grid-cols-2 gap-x-3 gap-y-1.5 border border-border bg-background/40 px-3 py-2 max-h-40 overflow-y-auto"
+            role="group"
+            aria-labelledby="channels-platforms-label"
+          >
+            {availablePlatforms.length === 0 && (
+              <span className="col-span-2 text-xs text-muted-foreground">
+                No platform catalog available.
+              </span>
+            )}
+            {availablePlatforms.map((platform) => (
+              <label
+                key={platform.id}
+                htmlFor={`channels-platform-${platform.id}`}
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+              >
+                <Checkbox
+                  id={`channels-platform-${platform.id}`}
+                  checked={draft.channels_allowed_platforms.includes(platform.id)}
+                  onCheckedChange={(checked) => togglePlatform(platform.id, checked === true)}
+                />
+                {platform.name}
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -225,13 +277,20 @@ function PermissionsEditor({ draft, saving, onCancel, onChange, onSave }: Permis
       </div>
 
       <div className="grid gap-2">
-        <Label htmlFor="network-ips">Network — allowed IPs (empty = unrestricted)</Label>
+        <Label htmlFor="network-ips">
+          Network — restrict incoming CRM requests to these IPs (empty = unrestricted)
+        </Label>
         <Input
           id="network-ips"
           placeholder="comma-separated IPs or CIDR ranges"
           value={draft.network_allowed_ips.join(", ")}
           onChange={(e) => onChange({ ...draft, network_allowed_ips: csvToList(e.target.value) })}
         />
+        <p className="text-xs text-muted-foreground">
+          Allowlists the source IP of INBOUND requests to this agent's own CRM endpoint
+          (<code>/p/{"<name>"}/v1</code>). Does not affect this agent's own outbound network
+          access.
+        </p>
       </div>
 
       <div className="flex justify-end gap-2">
@@ -266,6 +325,10 @@ export default function AgentsPage() {
   const [editingFor, setEditingFor] = useState<string | null>(null);
   const [draft, setDraft] = useState<AgentPermissionsUpdate | null>(null);
   const [savingPerms, setSavingPerms] = useState(false);
+  // Canonical platform catalog for the "Channels — allowed platforms" multi-select — the same
+  // /api/messaging/platforms list ChannelsPage.tsx renders, so an agent's allowlist can only ever
+  // reference a platform Hermes actually supports (no more hand-typed CSV that silently typos).
+  const [availablePlatforms, setAvailablePlatforms] = useState<MessagingPlatform[]>([]);
 
   const [rotatingFor, setRotatingFor] = useState<string | null>(null);
   // The one-time reveal after create or rotate. `mode: "create"` also needs
@@ -302,6 +365,16 @@ export default function AgentsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    api
+      .getMessagingPlatforms()
+      .then((res) => setAvailablePlatforms(res.platforms))
+      .catch(() => {
+        // Non-fatal: the multi-select just renders empty ("Loading platforms…" never resolves)
+        // rather than blocking the whole page over a catalog fetch failure.
+      });
+  }, []);
 
   const handleCreate = async () => {
     const name = newName.trim();
@@ -609,8 +682,8 @@ export default function AgentsPage() {
                     <span className="col-span-2 truncate">
                       Skills allowed: {p.skills.allowed.length ? p.skills.allowed.join(", ") : "(all)"}
                     </span>
-                    <span className="col-span-2 truncate">
-                      Network: {p.network.allowed_ips.length ? p.network.allowed_ips.join(", ") : "(unrestricted)"}
+                    <span className="col-span-2 truncate" title="Source IPs allowed to call this agent's CRM endpoint">
+                      Inbound CRM access: {p.network.allowed_ips.length ? p.network.allowed_ips.join(", ") : "(unrestricted)"}
                     </span>
                   </div>
 
@@ -618,6 +691,7 @@ export default function AgentsPage() {
                     <PermissionsEditor
                       draft={draft}
                       saving={savingPerms}
+                      availablePlatforms={availablePlatforms}
                       onCancel={() => {
                         setEditingFor(null);
                         setDraft(null);

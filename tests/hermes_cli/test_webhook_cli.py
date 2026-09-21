@@ -52,6 +52,17 @@ def test_webhook_base_url_maps_wildcard_hosts_to_localhost(monkeypatch, host):
     assert _get_webhook_base_url() == "http://localhost:9123"
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", None])
+def test_webhook_base_url_prefers_explicit_public_host_over_bind_address(monkeypatch, host):
+    # A bind address of 0.0.0.0/:: is never reachable from outside the host; an operator-set
+    # extra.public_host must win regardless of what extra.host is bound to.
+    monkeypatch.setattr(
+        "hermes_cli.webhook._get_webhook_config",
+        lambda: {"extra": {"host": host, "port": 9123, "public_host": "webhooks.example.com"}},
+    )
+    assert _get_webhook_base_url() == "http://webhooks.example.com:9123"
+
+
 class TestSubscribe:
 
 

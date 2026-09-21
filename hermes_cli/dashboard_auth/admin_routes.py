@@ -39,15 +39,24 @@ def _http(status_code: int, detail: str) -> HTTPException:
 
 
 def _agent_base_url() -> str:
-    """Base ``http://host:port`` the api_server platform listens on (the default profile's
-    config — under multiplex it is the single shared listener every profile's ``/p/<name>/v1``
-    is served through). Mirrors ``hermes_cli/webhook.py::_get_webhook_base_url`` for the
-    ``api_server`` platform instead of ``webhook``."""
+    """Base ``http://host:port`` a caller OUTSIDE this host can use to reach the api_server
+    platform (the default profile's config — under multiplex it is the single shared listener
+    every profile's ``/p/<name>/v1`` is served through). Mirrors
+    ``hermes_cli/webhook.py::_get_webhook_base_url`` exactly, including its ``extra.public_host``
+    override: ``extra.host`` is the BIND address (``0.0.0.0``/``::`` in any real deployment,
+    which is not reachable from outside the host/container), so a CRM given a bare "localhost"
+    URL for such a deployment can never actually reach the agent. ``extra.public_host`` lets the
+    operator state the externally-reachable hostname/IP explicitly (same shape as
+    ``dashboard.public_url`` in config_defaults.py); unset falls back to the previous heuristic."""
     from hermes_cli.config import cfg_get, load_config
     cfg = load_config()
     extra = cfg_get(cfg, "platforms", "api_server", "extra", default={}) or {}
-    host = extra.get("host")
-    display_host = "localhost" if not host or host in {"0.0.0.0", "::"} else host
+    public_host = extra.get("public_host")
+    if public_host:
+        display_host = public_host
+    else:
+        host = extra.get("host")
+        display_host = "localhost" if not host or host in {"0.0.0.0", "::"} else host
     if ":" in display_host and not display_host.startswith("["):
         display_host = f"[{display_host}]"
     port = cfg_get(cfg, "platforms", "api_server", "extra", "port", default=None) or extra.get("port", 8642)

@@ -3,11 +3,14 @@
 Every guard returns ``None`` when the write may proceed, else an error string
 the tool returns verbatim.
 Guards, in the order the tools apply them: ``_check_sensitive_path`` (hard
-deny), ``_check_binary_document_write``, ``_check_protected_instruction_write``
-(ALWAYS ask), ``_check_approval_required_write`` (normal gate),
-``_check_cross_profile_path`` (sandbox-mirror lost-work), ``_is_internal_file_tool_content``.
-``_stale_overwrite_blocker`` (write_file only, under the per-path lock) refuses a
-whole-file overwrite of content this task never saw or that changed since.
+deny — also covers the ``skills.policy`` path check and the SOUL.md identity-write
+check), ``_check_binary_document_write``, ``_check_protected_instruction_write``
+(ALWAYS ask — but this gate explicitly exempts ``$HERMES_HOME``, so it does NOT
+cover SOUL.md; see ``_check_identity_write_policy``), ``_check_approval_required_write``
+(normal gate), ``_check_cross_profile_path`` (sandbox-mirror lost-work),
+``_is_internal_file_tool_content``. ``_stale_overwrite_blocker`` (write_file only,
+under the per-path lock) refuses a whole-file overwrite of content this task never
+saw or that changed since.
 """
 
 import fnmatch
@@ -166,7 +169,7 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead.")
-    return _check_skills_policy_path(candidates[0])
+    return _check_skills_policy_path(candidates[0]) or _check_identity_write_policy(candidates[0])
 
 
 def _is_under_a_skills_root(resolved: str) -> bool:
@@ -234,6 +237,56 @@ def _check_skills_policy_path(resolved: str) -> str | None:
         f"Refusing to {verb} a skill file: {resolved}\n"
         f"This profile's skills policy ('{policy}') does not allow it — '{required}' or higher "
         f"is required. Ask an admin to raise this profile's skills.policy.")
+
+
+# Same policy dimension the CRM's PUT /v1/agent/soul enforces (gateway/platforms/
+# api_server_agent_admin.py:_IDENTITY_WRITE_POLICY) — identity content is gated as
+# "editing an existing skill" (read_write or higher), never a fourth permission axis.
+_IDENTITY_WRITE_POLICY = "read_write"
+_IDENTITY_POLICY_RANK = {"read": 0, "read_write": 1, "read_write_create": 2}
+
+
+def _check_identity_write_policy(resolved: str) -> str | None:
+    """Enforce ``skills.policy`` for a direct write to the active profile's own SOUL.md.
+
+    SOUL.md is the agent's identity file. The CRM route (``PUT /v1/agent/soul``) gates
+    writing it behind ``AgentPermissions.skills.policy >= read_write`` — but that route is
+    not the only way SOUL.md's bytes reach disk. The generic ``write_file``/``patch`` tools
+    funnel through this exact chokepoint (``_check_sensitive_path``) for every write, and
+    ``_check_protected_instruction_write`` (the "always ask a human" gate that would
+    otherwise catch a SOUL.md write) explicitly EXEMPTS everything under ``$HERMES_HOME``
+    ("~/.hermes itself is governed by its own guards") — so without this check, a restricted
+    profile's own turn loop could silently rewrite its own identity with ``patch`` alone (no
+    read-baseline requirement, unlike ``write_file``), with no approval prompt and no CRM
+    route involved at all. Reproduced live against a temp HERMES_HOME with
+    ``skills.policy: read`` (fail-closed default): ``patch_tool(mode="replace")`` overwrote
+    SOUL.md outright.
+
+    Scoped to the ACTIVE profile's own ``SOUL.md`` only — a sibling profile's SOUL.md is
+    already denied by ``_foreign_profile_reason`` (agent/file_safety.py) for an unrelated
+    reason (cross-profile isolation), and this check must not weaken that boundary or widen
+    it to paths outside the identity file itself.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        soul_path = os.path.realpath(str(Path(get_hermes_home()) / "SOUL.md"))
+    except Exception:
+        return None
+    if resolved != soul_path:
+        return None
+    try:
+        from hermes_cli.agent_permissions import load_agent_permissions
+        policy = load_agent_permissions().skills.policy
+    except Exception:
+        return None
+    if _IDENTITY_POLICY_RANK.get(policy, 0) >= _IDENTITY_POLICY_RANK[_IDENTITY_WRITE_POLICY]:
+        return None
+    return (
+        f"Refusing to write to SOUL.md: {resolved}\n"
+        f"This profile's skills policy ('{policy}') does not allow editing agent identity — "
+        f"'{_IDENTITY_WRITE_POLICY}' or higher is required. Ask an admin to raise this "
+        f"profile's skills.policy, or use the CRM PUT /v1/agent/soul route if you are the "
+        f"external integration this policy is meant to gate.")
 
 
 # ── Protected agent-instruction files (always-ask approval gate) ─────────

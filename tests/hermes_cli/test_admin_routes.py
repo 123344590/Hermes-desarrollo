@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from hermes_cli.agent_permissions import AgentPermissions, WebhookPermissions, write_agent_permissions
-from hermes_cli.dashboard_auth.admin_routes import router as admin_router
+from hermes_cli.dashboard_auth.admin_routes import _agent_base_url, router as admin_router
 from hermes_cli.dashboard_auth.base import Session
 
 
@@ -155,6 +155,22 @@ def test_put_permissions_rejects_unknown_profile():
               "channels_allowed_platforms": [], "skills_policy": "read", "skills_allowed": []},
     )
     assert r.status_code == 404
+
+
+def test_agent_base_url_prefers_explicit_public_host_over_bind_address(tmp_path):
+    # extra.host is the BIND address (0.0.0.0/:: in any real deployment) — never a URL an
+    # external CRM can dial. extra.public_host is the operator's explicit override and must win.
+    config_path = tmp_path / ".hermes" / "config.yaml"
+    config_path.write_text(
+        "platforms:\n"
+        "  api_server:\n"
+        "    extra:\n"
+        "      host: 0.0.0.0\n"
+        "      port: 8642\n"
+        "      public_host: crm.example.com\n",
+        encoding="utf-8",
+    )
+    assert _agent_base_url() == "http://crm.example.com:8642"
 
 
 def test_put_permissions_rejects_invalid_policy_value(tmp_path):

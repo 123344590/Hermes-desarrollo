@@ -56,9 +56,21 @@ def _is_webhook_enabled() -> bool:
 
 
 def _get_webhook_base_url() -> str:
+    """Base URL a caller outside this host can use to reach the webhook platform.
+
+    ``extra.host`` is the BIND address (what the socket listens on), which is routinely
+    ``0.0.0.0``/``::`` for a real deployment — that is never a URL a remote webhook sender
+    (GitHub, GitLab, ...) can dial. ``extra.public_host`` (mirrors ``dashboard.public_url``'s
+    "operator states the externally-reachable authority" pattern in config_defaults.py) is an
+    explicit operator override for the externally-reachable hostname/IP; when unset, falls back
+    to the previous bind-address heuristic (localhost unless a specific host was bound)."""
     wh = _get_webhook_config().get("extra", {})
-    host = wh.get("host")
-    display_host = "localhost" if not host or host in {"0.0.0.0", "::"} else host
+    public_host = wh.get("public_host")
+    if public_host:
+        display_host = public_host
+    else:
+        host = wh.get("host")
+        display_host = "localhost" if not host or host in {"0.0.0.0", "::"} else host
     if ":" in display_host and not display_host.startswith("["):
         display_host = f"[{display_host}]"
     return f"http://{display_host}:{wh.get('port', 8644)}"

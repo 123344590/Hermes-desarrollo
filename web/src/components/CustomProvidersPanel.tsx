@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Globe, Loader2, Plus, Star, Trash2, X, Zap } from "lucide-react";
+import { Globe, Loader2, Plug, Plus, Star, Trash2, X, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   CustomEndpoint,
@@ -54,6 +54,32 @@ const EMPTY_FORM: EndpointForm = {
   discoverModels: true,
   makeDefault: false,
 };
+
+/** Hostname-derived default name for Quick Connect, e.g. "https://litellm.acme.co/v1" ->
+ * "litellm.acme.co". Falls back to the raw trimmed input when the URL doesn't parse yet
+ * (still lets the user submit and hit the base_url validation error instead of a blank name). */
+function deriveNameFromUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim();
+  try {
+    const url = new URL(trimmed);
+    return url.host || trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Dedupe a candidate display name against already-configured endpoints. The backend keys
+ * entries by a slug of `name` (`_custom_endpoint_id`) and MERGES onto a matching slug rather
+ * than failing (see `_write_custom_endpoint`), so a Quick Connect that reused an existing
+ * name would silently overwrite that endpoint instead of creating a new one. Compare
+ * case-insensitively (the slug lowercases) and suffix "-2", "-3", ... until unique. */
+function uniqueEndpointName(candidate: string, existing: CustomEndpoint[]): string {
+  const taken = new Set(existing.map((e) => e.name.trim().toLowerCase()));
+  if (!taken.has(candidate.toLowerCase())) return candidate;
+  let n = 2;
+  while (taken.has(`${candidate}-${n}`.toLowerCase())) n += 1;
+  return `${candidate}-${n}`;
+}
 
 function formFromEndpoint(endpoint: CustomEndpoint): EndpointForm {
   return {
@@ -385,6 +411,168 @@ function CustomEndpointDialog({ endpoint, onClose, onSaved }: CustomEndpointDial
 }
 
 /* ──────────────────────────────────────────────────────────────────── */
+/*  Quick Connect — 2-field fast path (base URL + token) for the common   */
+/*  case: a proxy like LiteLLM. Validate + save happen together on submit,*/
+/*  with no separate "Test connection" click. Falls back to the full     */
+/*  "Add custom provider" dialog ("Advanced") for API-mode overrides,     */
+/*  context length, or picking among several detected models.            */
+/* ──────────────────────────────────────────────────────────────────── */
+
+interface QuickConnectDialogProps {
+  existing: CustomEndpoint[];
+  onClose(): void;
+  onSaved(response: { endpoints: CustomEndpoint[] }): void;
+  onAdvanced(): void;
+}
+
+function QuickConnectDialog({ existing, onClose, onSaved, onAdvanced }: QuickConnectDialogProps) {
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const modalRef = useModalBehavior({ open: true, onClose });
+
+  const canConnect = baseUrl.trim().length > 0 && !connecting;
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setError(null);
+    try {
+      const name = uniqueEndpointName(deriveNameFromUrl(baseUrl), existing);
+      const probeForm: EndpointForm = {
+        ...EMPTY_FORM,
+        name,
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+      };
+
+      // Validate first (no visible "Test connection" step) so a bad URL/token
+      // surfaces inline instead of silently falling through to Save.
+      const validation = await api.validateCustomEndpoint(toPayload(probeForm, [], []));
+      if (!validation.ok) {
+        setError(validation.message || "Could not connect — check the URL and token.");
+        return;
+      }
+
+      // Single detected model auto-selects (mirrors the full form / CLI's
+      // `_pick_detected_model`); with several, Quick Connect picks the first
+      // one so the common single-model proxy case never needs an extra step —
+      // multi-model nuance (or no detection at all) is what "Advanced" /
+      // "Edit" afterward is for, rather than growing this dialog a picker.
+      const models = validation.models;
+      const modelDetails = validation.model_details ?? [];
+      const model = models[0] ?? "";
+      const resolvedBaseUrl = validation.resolved_base_url?.trim() || probeForm.baseUrl;
+
+      const finalForm: EndpointForm = {
+        ...probeForm,
+        baseUrl: resolvedBaseUrl,
+        model,
+        discoverModels: true,
+        makeDefault: true,
+      };
+
+      const response = await api.upsertCustomEndpoint(toPayload(finalForm, models, modelDetails));
+      onSaved(response);
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  return createPortal(
+    <div
+      ref={modalRef}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 p-4"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="quick-connect-title"
+    >
+      <div
+        className={cn(
+          themedBody,
+          "relative flex max-h-[90vh] w-full max-w-sm flex-col border border-border bg-card shadow-2xl",
+        )}
+      >
+        <Button
+          ghost
+          size="icon"
+          onClick={onClose}
+          className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+          aria-label="Close"
+        >
+          <X />
+        </Button>
+
+        <header className="p-5 pb-3 border-b border-border">
+          <h2 id="quick-connect-title" className="font-mondwest text-display text-base tracking-wider">
+            Connect
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            For a proxy like LiteLLM: base URL + token.
+          </p>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 grid gap-4">
+          <div className="grid gap-2">
+            <Label htmlFor="qc-base-url">Base URL</Label>
+            <Input
+              id="qc-base-url"
+              autoFocus
+              placeholder="https://litellm.example.com/v1"
+              value={baseUrl}
+              onChange={(e) => {
+                setBaseUrl(e.target.value);
+                setError(null);
+              }}
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="qc-token">Token</Label>
+            <Input
+              id="qc-token"
+              type="password"
+              placeholder="Optional"
+              value={apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                setError(null);
+              }}
+            />
+          </div>
+
+          {error && <p className="text-xs text-destructive">{error}</p>}
+
+          <div className="flex items-center justify-between gap-2 pt-2">
+            <Button type="button" ghost size="sm" className="text-xs" onClick={onAdvanced} disabled={connecting}>
+              Advanced setup…
+            </Button>
+            <div className="flex gap-2">
+              <Button type="button" ghost onClick={onClose} disabled={connecting}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleConnect()}
+                disabled={!canConnect}
+                prefix={connecting ? <Spinner /> : <Plug className="h-3.5 w-3.5" />}
+              >
+                {connecting ? "Connecting…" : "Connect"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
 /*  Panel: list + row actions                                           */
 /* ──────────────────────────────────────────────────────────────────── */
 
@@ -393,6 +581,7 @@ export function CustomProvidersPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dialogTarget, setDialogTarget] = useState<CustomEndpoint | "new" | null>(null);
+  const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<CustomEndpoint | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -445,15 +634,25 @@ export function CustomProvidersPanel() {
             <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
             <CardTitle className="text-sm">Custom Providers</CardTitle>
           </div>
-          <Button
-            size="sm"
-            outlined
-            className="text-xs uppercase"
-            prefix={<Plus className="h-3.5 w-3.5" />}
-            onClick={() => setDialogTarget("new")}
-          >
-            Add custom provider
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <Button
+              size="sm"
+              className="text-xs uppercase"
+              prefix={<Plug className="h-3.5 w-3.5" />}
+              onClick={() => setQuickConnectOpen(true)}
+            >
+              Connect
+            </Button>
+            <Button
+              size="sm"
+              outlined
+              className="text-xs uppercase"
+              prefix={<Plus className="h-3.5 w-3.5" />}
+              onClick={() => setDialogTarget("new")}
+            >
+              Add custom provider
+            </Button>
+          </div>
         </div>
       </CardHeader>
 
@@ -526,6 +725,18 @@ export function CustomProvidersPanel() {
           </div>
         ))}
       </CardContent>
+
+      {quickConnectOpen && (
+        <QuickConnectDialog
+          existing={endpoints}
+          onClose={() => setQuickConnectOpen(false)}
+          onSaved={(response) => setEndpoints(response.endpoints)}
+          onAdvanced={() => {
+            setQuickConnectOpen(false);
+            setDialogTarget("new");
+          }}
+        />
+      )}
 
       {dialogTarget && (
         <CustomEndpointDialog
