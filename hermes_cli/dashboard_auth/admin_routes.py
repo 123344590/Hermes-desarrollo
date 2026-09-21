@@ -70,14 +70,23 @@ def _agent_url(name: str) -> str:
 def _ensure_multiplex_enabled() -> None:
     """Turn on ``gateway.multiplex_profiles`` (default profile) if it isn't already — a named
     profile's ``/p/<name>/v1`` only serves over the shared listener when this is on. Idempotent;
-    never downgrades an operator's own separate-gateway choice back off once explicitly set True."""
+    never downgrades an operator's own separate-gateway choice back off once explicitly set True.
+
+    ``preserve_keys`` is required here, not optional: ``multiplex_profiles``'s schema default is
+    already ``True`` (see ``config_defaults.py`` — "an UNSET key is a request, not a verdict"),
+    so a bare ``save_config`` would strip the value we just wrote right back out as
+    "matches the default", leaving the key unset on disk. Unset and explicit-``True`` are NOT the
+    same thing to the gateway's own startup preflight (unset lets it decide; explicit ``True``
+    forces multiplex outright) — without ``preserve_keys`` this call would silently no-op and a
+    newly created agent's ``/p/<name>/v1`` would never actually come up.
+    """
     from hermes_cli.config import cfg_get, read_raw_config, save_config
     existing = read_raw_config()
     if cfg_get(existing, "gateway", "multiplex_profiles", default=False):
         return
     patch = {"gateway": {"multiplex_profiles": True}}
     from hermes_cli.config import _deep_merge
-    save_config(_deep_merge(existing, patch), merge_existing=True)
+    save_config(_deep_merge(existing, patch), merge_existing=True, preserve_keys={("gateway", "multiplex_profiles")})
 
 
 def _issue_api_server_key(profile_name: str) -> str:
