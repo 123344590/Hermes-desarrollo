@@ -265,6 +265,8 @@ def _validate_bot_chat_deliver(deliver: Optional[str]) -> Optional[str]:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
     except Exception:
         return None  # best-effort; resolution re-checks at fire time
+    from hermes_cli.profiles import get_active_profile_name
+    active = get_active_profile_name() or "default"
     for part in str(deliver).split(","):
         profile_arg = parse_bot_chat_deliver_token(part.strip())
         if not profile_arg:
@@ -273,6 +275,14 @@ def _validate_bot_chat_deliver(deliver: Optional[str]) -> Optional[str]:
             canon = normalize_profile_name(profile_arg)
         except Exception:
             return f"invalid bot-chat profile name '{profile_arg}'"
+        # Delivering into another profile's Bot Chat costs that agent a turn (see the note in
+        # _cron_notes), so a restricted agent could make another agent act on text it supplied,
+        # on a schedule. Only the admin profile may target others. This also closes an
+        # existence oracle: the refusal below would otherwise reveal which profiles exist.
+        if active != "default" and canon != normalize_profile_name(active):
+            return (
+                f"bot-chat delivery to profile '{profile_arg}' is not permitted — an agent may "
+                f"only deliver to its own Bot Chat. Omit the name (deliver='bot-chat').")
         if not profile_exists(canon):
             return (
                 f"bot-chat delivery profile '{profile_arg}' not found on this "

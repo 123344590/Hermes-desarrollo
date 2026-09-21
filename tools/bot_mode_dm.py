@@ -172,6 +172,15 @@ def _resolve_local_name(target: str, roster: list[str], root: Path | None = None
     want = target.strip().lower()
     if not want:
         return None
+    # Delivering to another local profile starts a real agent turn there, on that profile's own
+    # credentials, carrying attacker-supplied text — the same escalation shape as assigning
+    # kanban work to another profile. A restricted profile therefore resolves no local teammate
+    # at all; only the admin may DM across the roster. Returning None reuses the existing
+    # "unknown target" path, so this also never confirms which profiles exist.
+    with contextlib.suppress(Exception):
+        from hermes_cli.profiles import get_active_profile_name
+        if (get_active_profile_name() or "default") != "default":
+            return None
     if want == "hermes":
         return "default" if "default" in roster else None
     exact = next((name for name in roster if name.lower() == want), None)
@@ -220,6 +229,13 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     roster = list(roster_homes)
     peers = _peers(root)
     teammates = [_handle(n) for n in roster if n != me]
+    # Error payloads carry this list back to the model, so for a restricted profile it would
+    # disclose the very roster per-agent isolation withholds — and which _resolve_local_name
+    # above has already made unreachable. Empty for everyone but the admin.
+    with contextlib.suppress(Exception):
+        from hermes_cli.profiles import get_active_profile_name
+        if (get_active_profile_name() or "default") != "default":
+            teammates = []
 
     def _roster_err(msg: str) -> str:
         return _err(msg, roster=teammates, peers=peers)

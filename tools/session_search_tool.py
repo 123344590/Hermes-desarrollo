@@ -438,6 +438,17 @@ def _resolve_profile_db(profile: str):
     from hermes_state import SessionDB
     canon = profiles_mod.normalize_profile_name(profile)
     profiles_mod.validate_profile_name(canon)
+    # Only the admin profile may read across profiles. A sibling's state.db holds its full
+    # transcript history — anything pasted into that agent's chat, including credentials —
+    # and read_file cannot reach it (state.db is in _HERMES_PROTECTED_SUBPATHS and the
+    # foreign-profile guard covers the home), so this parameter must not hand over the same
+    # content parsed and paginated. The refusal is deliberately identical whether the profile
+    # exists or not: distinguishing them turns this into a roster oracle.
+    active = profiles_mod.get_active_profile_name() or "default"
+    if active != "default" and canon != profiles_mod.normalize_profile_name(active):
+        raise ValueError(
+            f"profile '{canon}' is not available from this agent — an agent may only search "
+            f"its own session history.")
     if not profiles_mod.profile_exists(canon):
         raise ValueError(f"profile '{canon}' does not exist")
     return SessionDB(db_path=profiles_mod.get_profile_dir(canon) / "state.db", read_only=True)

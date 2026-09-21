@@ -415,8 +415,16 @@ def _foreign_profile_reason(resolved: Path) -> Optional[str]:
     (``hermes_cli/agent_permissions.py``) withholds even the existence of other agents, so the
     roster directory is denied as a whole.
 
-    The active profile's own home stays readable; the ``default`` (admin) profile is exempt,
+    The active profile's own home stays reachable; the ``default`` (admin) profile is exempt,
     matching ``_UNRESTRICTED_PROFILES`` there.
+
+    The boundary is anchored on the Hermes ROOT, not on the ``profiles/`` path shape. The
+    ``default`` profile's home is ``<root>`` itself (see ``hermes_cli/profiles.py::
+    get_profile_dir``), not ``<root>/profiles/default`` — so a roster-relative test leaves
+    everything directly under ``<root>`` (the admin's ``SOUL.md``, ``config.yaml``,
+    ``skills/``, ``cron/``) outside the check, which is the single most valuable target:
+    payload written into the admin's skill tree later executes with every permission granted.
+    Testing against the root covers ``<root>/*`` and ``<root>/profiles/*`` uniformly.
     """
     try:
         from hermes_cli.profiles import get_active_profile_name
@@ -427,12 +435,13 @@ def _foreign_profile_reason(resolved: Path) -> Optional[str]:
         return None
     try:
         active_home = _hermes_home_path().resolve()
+        root = _hermes_root_path().resolve()
     except Exception:
         return None
 
-    # Under a profile, HERMES_HOME is <root>/profiles/<name>, so the roster is its parent.
-    roster = active_home.parent
-    if roster.name != "profiles" or not _is_under(resolved, roster):
+    # Only paths inside the Hermes tree are in scope; anything else (a project checkout,
+    # /tmp, the user's own files) is governed by the other guards, not profile isolation.
+    if not _is_under(resolved, root):
         return None
     if resolved == active_home or _is_under(resolved, active_home):
         return None

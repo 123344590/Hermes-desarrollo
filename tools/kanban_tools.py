@@ -633,13 +633,18 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error("limit must be an integer")
     _check(limit >= 1, "limit must be >= 1")
     _check(limit <= KANBAN_LIST_MAX_LIMIT, f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
+    # The board is shared across profiles, so an unfiltered list hands a restricted agent
+    # every other agent's task titles, assignees and status — the roster and workload that
+    # per-agent isolation withholds. A restricted profile therefore always lists as itself,
+    # whatever `assignee` it asked for; `default` (admin) keeps the board-wide view.
+    assignee_filter = _scoped_assignee_filter(args.get("assignee"))
     with _board(args.get("board")) as (kb, conn):
         # Match CLI list: dependencies cleared since the last dispatcher tick
         # should be visible to orchestrators immediately.
         promoted = kb.recompute_ready(conn)
         # One extra row lets the output report truncation without dumping the board.
         rows = kb.list_tasks(
-            conn, assignee=args.get("assignee"), status=args.get("status"),
+            conn, assignee=assignee_filter, status=args.get("status"),
             tenant=args.get("tenant"), include_archived=include_archived, limit=limit + 1)
         truncated = len(rows) > limit
         tasks = rows[:limit]
@@ -989,6 +994,22 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
         return session_id if state.get_session(session_id) else None
     finally:
         state.close()
+
+
+def _scoped_assignee_filter(requested: Any) -> Any:
+    """The ``assignee`` filter a listing may actually use.
+
+    ``default`` (admin) gets whatever it asked for, including no filter at all. Every other
+    profile is pinned to its own name: the kanban board is shared across profiles, so an
+    unfiltered ``list_tasks`` would disclose other agents' task titles, assignees and status.
+    Returning the caller's own name rather than raising keeps ``kanban_list`` useful — the
+    agent still sees its own board — without revealing that other profiles exist.
+    """
+    from hermes_cli.profiles import get_active_profile_name
+    active = get_active_profile_name() or "default"
+    if active == "default":
+        return requested
+    return active
 
 
 def _check_assignee_permitted(assignee: str) -> None:

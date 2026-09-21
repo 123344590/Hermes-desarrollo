@@ -165,7 +165,38 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead.")
-    return None
+    return _check_skills_policy_path(candidates[0])
+
+
+def _check_skills_policy_path(resolved: str) -> str | None:
+    """Enforce ``skills.policy`` for writes that land in a skills tree.
+
+    ``skills.policy`` was gated only inside ``skill_manage`` (and its batch shape) — on one
+    tool's NAME rather than on the capability. A profile with ``policy: read`` could therefore
+    create or rewrite a skill with ``write_file``/``patch``, the same durable prompt-injection
+    surface the policy exists to control; closing the batch shape alone just moved the bypass
+    one tool over. Checking here, at the write chokepoint every file tool funnels through,
+    means a newly added tool cannot reopen it.
+
+    Creating (target absent) needs ``read_write_create``; modifying an existing skill needs
+    ``read_write``. The ``default`` (admin) profile resolves unrestricted and is unaffected.
+    """
+    if "skills" not in Path(resolved).parts:
+        return None
+    try:
+        from hermes_cli.agent_permissions import load_agent_permissions
+        policy = load_agent_permissions().skills.policy
+    except Exception:
+        return None
+    required = "read_write_create" if not os.path.exists(resolved) else "read_write"
+    rank = {"read": 0, "read_write": 1, "read_write_create": 2}
+    if rank.get(policy, 0) >= rank[required]:
+        return None
+    verb = "create" if required == "read_write_create" else "modify"
+    return (
+        f"Refusing to {verb} a skill file: {resolved}\n"
+        f"This profile's skills policy ('{policy}') does not allow it — '{required}' or higher "
+        f"is required. Ask an admin to raise this profile's skills.policy.")
 
 
 # ── Protected agent-instruction files (always-ask approval gate) ─────────
