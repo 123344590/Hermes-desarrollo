@@ -206,6 +206,21 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
     names, err = _validate_batch_ops(operations, default_name, tool_error)
     if err is not None:
         return err
+    # skills.policy gate — the batch path returns from skill_manage() BEFORE its own
+    # _check_skill_policy call, and then sets _skill_gate_bypass for the per-op re-entry below,
+    # so without this check a read-only profile could create/edit/delete skills simply by
+    # passing `operations=[...]` instead of the flat fields. Checked per op, since a batch may
+    # mix actions with different policy requirements.
+    if not _smt._skill_gate_bypass.get():
+        from tools.skill_manager_guards import _check_skill_policy
+        for idx, op in enumerate(operations):
+            op_name = op.get("name") or default_name or ""
+            refusal = _check_skill_policy(op.get("action", ""), op_name)
+            if refusal is not None:
+                refusal = dict(refusal)
+                refusal["error"] = (f"operations[{idx}] ({op.get('action')} on {op_name!r}) "
+                                    f"refused: {refusal.get('error', 'denied by skills policy')}")
+                return json.dumps(refusal, ensure_ascii=False)
     if not _smt._skill_gate_bypass.get():
         # Approval gate for the WHOLE batch as one pending write.
         def _staging(wa):
