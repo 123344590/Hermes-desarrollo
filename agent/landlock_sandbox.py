@@ -219,11 +219,19 @@ def restrict_to_profile_home(
     for env_var in ("TMPDIR", "TMP", "TEMP"):
         os.environ[env_var] = tmp_dir_str
 
+    # The profile's own permissions file lives OUTSIDE the home precisely so this home-wide
+    # write grant cannot reach it; mount its control dir read-only so the agent can still read
+    # the permissions that constrain it. Landlock rules union, so this must be a path the
+    # read/write rule above does not already cover — hence the out-of-home layout.
+    control_dir = Path(profile_home).parent / ".control" / Path(profile_home).name
+
     ruleset_fd = _create_ruleset(libc)
     try:
         _add_rule(libc, ruleset_fd, str(profile_home), _ACCESS_FS_READ_WRITE)
         for path in extra_read_write_paths:
             _add_rule(libc, ruleset_fd, path, _ACCESS_FS_READ_WRITE)
+        if control_dir.is_dir():
+            _add_rule(libc, ruleset_fd, str(control_dir), _ACCESS_FS_READ_ONLY)
         for path in (*_READ_ONLY_SYSTEM_PATHS, *extra_read_only_paths):
             _add_rule(libc, ruleset_fd, path, _ACCESS_FS_READ_ONLY)
         for path in _READ_WRITE_SYSTEM_PATHS:

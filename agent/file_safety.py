@@ -386,7 +386,47 @@ def get_read_block_error(path: str) -> Optional[str]:
                 "is a secret-bearing environment file and cannot be read to prevent credential "
                 "leakage. If you need to check the file structure, read .env.example instead." + _DID_SUFFIX
             )
+        if reason is None:
+            reason = _foreign_profile_reason(resolved)
     return f"Access denied: {path} {reason}" if reason else None
+
+
+def _foreign_profile_reason(resolved: Path) -> Optional[str]:
+    """Deny reads that reach INTO another profile's home, or list the profile roster itself.
+
+    The terminal tool is confined per-profile by Landlock, but these generic file tools run
+    in-process in the gateway, where no kernel boundary applies — so without this check a
+    restricted agent can read a sibling's ``config.yaml``/``SOUL.md``, or list the profiles
+    directory and learn which other agents exist at all. Per-agent isolation
+    (``hermes_cli/agent_permissions.py``) withholds even the existence of other agents, so the
+    roster directory is denied as a whole.
+
+    The active profile's own home stays readable; the ``default`` (admin) profile is exempt,
+    matching ``_UNRESTRICTED_PROFILES`` there.
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        active = get_active_profile_name() or "default"
+    except Exception:
+        return None
+    if active == "default":
+        return None
+    try:
+        active_home = _hermes_home_path().resolve()
+    except Exception:
+        return None
+
+    # Under a profile, HERMES_HOME is <root>/profiles/<name>, so the roster is its parent.
+    roster = active_home.parent
+    if roster.name != "profiles" or not _is_under(resolved, roster):
+        return None
+    if resolved == active_home or _is_under(resolved, active_home):
+        return None
+    return (
+        "belongs to a different agent profile. Each agent can only reach files under its own "
+        "profile home; other agents' files, and the profile roster itself, are not visible."
+        + _DID_SUFFIX
+    )
 
 
 def raise_if_read_blocked(path: str) -> None:

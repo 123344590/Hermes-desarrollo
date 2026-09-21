@@ -790,13 +790,17 @@ def _handle_request_review(args: dict, **kw) -> str:
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
     if reviewer:
-        from hermes_cli.profiles import list_profile_names, profile_exists
+        from hermes_cli.profiles import profile_exists
 
         # A non-profile reviewer would park the card in `review` on an assignee
-        # the dispatcher can never spawn (#106163).
+        # the dispatcher can never spawn (#106163). The roster itself is NOT named here:
+        # listing every installed profile tells a restricted agent which other agents exist
+        # on this host, which per-agent isolation is meant to withhold (see
+        # hermes_cli/agent_permissions.py). The caller learns only whether the name it
+        # already supplied is valid.
         _check(profile_exists(reviewer),
                f"reviewer profile {reviewer!r} is not installed. "
-               f"Installed profiles: {', '.join(list_profile_names())}")
+               f"Ask an admin which reviewer profile to use.")
     with _board(args.get("board")) as (kb, conn):
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
         try:

@@ -14,6 +14,7 @@ itself capabilities. See ``tests/hermes_cli/test_agent_permissions_not_agent_wri
 """
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional, Tuple
@@ -23,7 +24,12 @@ from utils import atomic_yaml_write, file_signature
 SkillsPolicy = Literal["read", "read_write", "read_write_create"]
 
 _PERMISSIONS_FILENAME = "permissions.yaml"
-_PERMISSIONS_FILE_MODE = 0o640
+# World-readable on purpose: the agent must be able to read its own (non-secret) grants, or the
+# fail-closed loader degrades every permission to "deny". Write protection comes from the
+# out-of-home control directory, not from this mode. See write_agent_permissions().
+_PERMISSIONS_FILE_MODE = 0o644
+# Sibling of the profiles tree, never inside a profile home — see control_dir_for().
+_CONTROL_DIRNAME = ".control"
 
 # Profiles that always resolve unrestricted regardless of permissions.yaml: the admin operates
 # hermes through the "default" profile, so it must behave exactly as it did before this feature.
@@ -74,9 +80,46 @@ def _unrestricted() -> AgentPermissions:
     )
 
 
+def control_dir_for(profile_dir: Path) -> Path:
+    """The out-of-home control directory holding *profile_dir*'s permissions file.
+
+    Deliberately OUTSIDE the profile home: the Landlock ruleset grants the agent's terminal
+    read/WRITE over its whole home (``agent/landlock_sandbox.py``), so a permissions file stored
+    inside it is writable by the very agent it constrains — a plain
+    ``echo 'skills: {policy: read_write_create}' > $HOME/permissions.yaml`` from the terminal
+    tool silently grants full rights. Landlock rules UNION rather than override, so a narrower
+    read-only rule on the file cannot claw that back (verified against a live 6.x kernel); the
+    file has to live somewhere the home-wide write rule does not cover. The sandbox adds this
+    directory as READ-ONLY, so the agent can still read its own permissions but never rewrite
+    them.
+
+    Layout: ``<profiles_root>/.control/<profile name>/permissions.yaml``, i.e. a sibling of the
+    ``profiles/`` tree rather than a child of any single profile.
+    """
+    profile_dir = Path(profile_dir)
+    return profile_dir.parent / _CONTROL_DIRNAME / profile_dir.name
+
+
 def permissions_path(profile_dir: Path) -> Path:
-    """Path to *profile_dir*'s ``permissions.yaml`` (analogous to ``webhook._subscriptions_path``
-    but per-profile: each profile directory owns exactly one permissions file)."""
+    """Path to *profile_dir*'s ``permissions.yaml``.
+
+    Resolves to the out-of-home control directory (see :func:`control_dir_for`). A legacy
+    in-home file is still honoured for reading when no control-dir file exists yet, so an
+    existing deployment keeps working until :func:`write_agent_permissions` migrates it on the
+    next admin write.
+    """
+    profile_dir = Path(profile_dir)
+    controlled = control_dir_for(profile_dir) / _PERMISSIONS_FILENAME
+    if controlled.exists():
+        return controlled
+    legacy = profile_dir / _PERMISSIONS_FILENAME
+    if legacy.exists():
+        return legacy
+    return controlled
+
+
+def legacy_permissions_path(profile_dir: Path) -> Path:
+    """The pre-migration in-home location, kept only so writers can clean it up."""
     return Path(profile_dir) / _PERMISSIONS_FILENAME
 
 
@@ -213,14 +256,33 @@ def _to_raw(perms: AgentPermissions) -> dict:
 def write_agent_permissions(profile_dir: Path, perms: AgentPermissions) -> None:
     """Persist *perms* for the profile at *profile_dir*. The ONLY writer of permissions.yaml.
 
-    Written 0640 (owner read/write, group read, no world access) so that once a profile also gets
-    a dedicated OS user, that user can read its own permissions but never modify them — only the
-    admin/owning account can. Callers MUST be an already-authenticated admin surface; this
-    function performs no authorization check itself, by design (see module docstring: the
-    guarantee is that nothing reachable from an agent's own turn imports this function at all).
+    Stored in the out-of-home control directory (:func:`control_dir_for`), which is what actually
+    keeps an agent from rewriting its own grants: the file mode cannot, since the admin process
+    and the agent may run as the same OS user, and a file's owner can always rewrite it.
+
+    Written world-READABLE (0644) on purpose. The agent MUST be able to read the permissions that
+    constrain it — ``load_agent_permissions`` is fail-closed, so a file the agent cannot read
+    silently degrades every grant to "deny" and the admin's settings stop taking effect. The file
+    holds no secrets (policy levels, counts, platform names, IP ranges), and write protection
+    comes from the directory, not the mode.
+
+    Callers MUST be an already-authenticated admin surface; this function performs no
+    authorization check itself, by design (see module docstring: the guarantee is that nothing
+    reachable from an agent's own turn imports this function at all).
     """
-    path = permissions_path(Path(profile_dir))
+    profile_dir = Path(profile_dir)
+    control_dir = control_dir_for(profile_dir)
+    control_dir.mkdir(parents=True, exist_ok=True)
+    path = control_dir / _PERMISSIONS_FILENAME
     atomic_yaml_write(path, _to_raw(perms), create_mode=_PERMISSIONS_FILE_MODE)
+
+    # Migration: a pre-existing in-home file would still be readable (and agent-writable), so it
+    # must not survive as a shadow copy once the authoritative one lives out of reach.
+    legacy = legacy_permissions_path(profile_dir)
+    if legacy.exists():
+        with suppress(OSError):
+            legacy.unlink()
+
     cache_key = _cache_key(path)
     if cache_key is not None:
         _PERMISSIONS_CACHE.pop(cache_key, None)
