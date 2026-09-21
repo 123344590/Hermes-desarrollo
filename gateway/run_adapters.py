@@ -1600,23 +1600,35 @@ class GatewayAdapterLifecycleMixin:
         from hermes_cli.profiles import get_active_profile_name
         profile_name = get_active_profile_name()
         perms = load_agent_permissions(profile_name=profile_name)
+        # An empty allowed_platforms means "no platform restriction", which is how the
+        # unrestricted (admin) profile is expressed — it pairs an empty tuple with an
+        # effectively infinite max. The COUNT is what gates a restricted profile.
         if perms.channels.allowed_platforms and platform.value not in perms.channels.allowed_platforms:
             logger.warning(
-                "Platform '%s' blocked by admin channel policy for profile '%s'",
-                platform.value, profile_name,
+                "Platform '%s' blocked by admin channel policy for profile '%s' (allowed: %s)",
+                platform.value, profile_name, list(perms.channels.allowed_platforms),
             )
             return False
-        if perms.channels.max:
-            active = (
-                self.adapters if profile_name == "default"
-                else (getattr(self, "_profile_adapters", None) or {}).get(profile_name)
+        # max <= 0 means "no channels granted", never "unlimited" — that is the fail-closed
+        # default of AgentPermissions for any profile the admin has not configured. Testing
+        # `if perms.channels.max:` treated 0 as falsy and skipped the limit entirely, so a
+        # profile granted zero channels could bring up any adapter.
+        if perms.channels.max <= 0:
+            logger.warning(
+                "Profile '%s' is granted 0 channels; refusing to start '%s'",
+                profile_name, platform.value,
             )
-            if active is not None and len(active) >= perms.channels.max:
-                logger.warning(
-                    "Profile '%s' channel limit (%d) reached; refusing to start '%s'",
-                    profile_name, perms.channels.max, platform.value,
-                )
-                return False
+            return False
+        active = (
+            self.adapters if profile_name == "default"
+            else (getattr(self, "_profile_adapters", None) or {}).get(profile_name)
+        )
+        if active is not None and len(active) >= perms.channels.max:
+            logger.warning(
+                "Profile '%s' channel limit (%d) reached; refusing to start '%s'",
+                profile_name, perms.channels.max, platform.value,
+            )
+            return False
         return True
 
     def _instantiate_adapter(self, platform: Platform, config: Any) -> Optional[BasePlatformAdapter]:
