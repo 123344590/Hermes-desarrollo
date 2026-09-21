@@ -764,6 +764,34 @@ export const api = {
       },
     ),
 
+  // Agent permissions + CRM provisioning (hermes_cli/dashboard_auth/admin_routes.py).
+  // Admin-only: every route 403s for a non-admin dashboard session.
+  getAgents: () => fetchJSON<{ agents: AdminAgentInfo[] }>("/api/admin/agents"),
+  createAgent: (body: { name: string; description?: string }) =>
+    fetchJSON<AdminAgentCreateResponse>("/api/admin/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  getAgentPermissions: (name: string) =>
+    fetchJSON<AgentPermissionsJson>(
+      `/api/admin/agents/${encodeURIComponent(name)}/permissions`,
+    ),
+  updateAgentPermissions: (name: string, body: AgentPermissionsUpdate) =>
+    fetchJSON<AgentPermissionsJson>(
+      `/api/admin/agents/${encodeURIComponent(name)}/permissions`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  rotateAgentToken: (name: string) =>
+    fetchJSON<AdminAgentTokenResponse>(
+      `/api/admin/agents/${encodeURIComponent(name)}/rotate-token`,
+      { method: "POST" },
+    ),
+
   // Skills & Toolsets
   //
   // All calls accept an optional ``profile`` so the Skills page can manage
@@ -2239,6 +2267,54 @@ export interface ProfileInfo {
   distribution_version: string | null;
   distribution_source: string | null;
   has_alias: boolean;
+}
+
+// Mirrors hermes_cli/agent_permissions.py::AgentPermissions and
+// admin_routes.py::_permissions_to_json — the JSON shape returned by both
+// GET /api/admin/agents (nested under `permissions`) and the permissions
+// GET/PUT endpoints directly.
+export interface AgentPermissionsJson {
+  webhooks: { can_manage: boolean; max: number };
+  channels: { max: number; allowed_platforms: string[] };
+  skills: { policy: "read" | "read_write" | "read_write_create"; allowed: string[] };
+  network: { allowed_ips: string[] };
+}
+
+// Body shape for PUT .../permissions — a flat request mirroring
+// admin_routes.py::_PermissionsBody (the write side uses flat keys, the
+// read side returns the nested AgentPermissionsJson above).
+export interface AgentPermissionsUpdate {
+  webhooks_can_manage: boolean;
+  webhooks_max: number;
+  channels_max: number;
+  channels_allowed_platforms: string[];
+  skills_policy: "read" | "read_write" | "read_write_create";
+  skills_allowed: string[];
+  network_allowed_ips: string[];
+}
+
+export interface AdminAgentInfo {
+  name: string;
+  is_default: boolean;
+  gateway_running: boolean;
+  permissions: AgentPermissionsJson;
+  crm: { url: string; has_api_key: boolean };
+}
+
+// POST /api/admin/agents — the token is present ONLY in this create
+// response; GET /api/admin/agents never re-exposes it (has_api_key only).
+export interface AdminAgentCreateResponse {
+  name: string;
+  path: string;
+  permissions: AgentPermissionsJson;
+  crm: { name: string; url: string; token: string };
+}
+
+// POST /api/admin/agents/{name}/rotate-token — same one-time-reveal shape.
+export interface AdminAgentTokenResponse {
+  name: string;
+  url: string;
+  token: string;
 }
 
 export interface ModelsAnalyticsModelEntry {
