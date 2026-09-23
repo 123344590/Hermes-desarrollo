@@ -89,6 +89,45 @@ def _ensure_multiplex_enabled() -> None:
     save_config(_deep_merge(existing, patch), merge_existing=True, preserve_keys={("gateway", "multiplex_profiles")})
 
 
+def _sync_outbound_network_permissions(
+    profile_name: str, *, allow_private_urls: bool, allowed_private_ips: tuple[str, ...]
+) -> None:
+    """Bridge ``AgentPermissions.network.{allow_private_urls,allowed_private_ips}`` into
+    *profile_name*'s OWN ``config.yaml`` as ``security.allow_private_urls`` /
+    ``security.allowed_private_ips`` — the two are separate systems (``permissions.yaml`` in the
+    out-of-home control dir vs. the profile's own config.yaml that
+    ``tools/url_safety.py::_resolve_allow_private_urls`` /
+    ``tools/url_safety.py::_resolve_allowed_private_ips`` read), and only this write makes the
+    admin's grant actually change what the agent's own network-facing tools (terminal, url
+    fetch, browser) may reach. Runs under ``_profile_scope`` so ``read_raw_config``/``save_config``
+    resolve to THAT profile's home, never the admin's own (default) profile — same primitive
+    ``_issue_api_server_key`` uses to scope its ``.env`` write.
+
+    Both keys are written together (one ``save_config`` call) since they are two facets of the
+    same OUTBOUND grant and always change together from this one admin write path.
+
+    ``preserve_keys`` is required here, not optional: both keys' schema defaults are already
+    ``False`` / ``[]`` (see ``config_defaults.py``), so writing the fail-closed common case
+    (``False`` / empty list — most profiles never opt in) would be stripped straight back out by
+    ``save_config``'s "matches the default" pass as if the admin had never set it. That is
+    harmless the FIRST time (unset already behaves the same as the default), but it means a later
+    explicit grant that gets revoked back to the default would leave the on-disk value unset
+    instead of the explicit choice the admin just made, and any consumer that some day
+    distinguishes "unset" from "explicit default" would silently misbehave. Force both explicit
+    every write, exactly like ``_ensure_multiplex_enabled`` forces ``gateway.multiplex_profiles``."""
+    from hermes_cli.config import _deep_merge, read_raw_config, save_config
+    from hermes_cli.web_server_profiles import _profile_scope
+    with _profile_scope(profile_name):
+        existing = read_raw_config()
+        patch = {"security": {
+            "allow_private_urls": allow_private_urls,
+            "allowed_private_ips": list(allowed_private_ips),
+        }}
+        save_config(
+            _deep_merge(existing, patch), merge_existing=True,
+            preserve_keys={("security", "allow_private_urls"), ("security", "allowed_private_ips")})
+
+
 def _issue_api_server_key(profile_name: str) -> str:
     """Generate and persist a fresh API_SERVER_KEY into *profile_name*'s .env, returning it.
     Runs under that profile's HERMES_HOME scope so the write lands in ITS .env, never the
@@ -106,7 +145,11 @@ def _permissions_to_json(perms: AgentPermissions) -> dict:
         "webhooks": {"can_manage": perms.webhooks.can_manage, "max": perms.webhooks.max},
         "channels": {"max": perms.channels.max, "allowed_platforms": list(perms.channels.allowed_platforms)},
         "skills": {"policy": perms.skills.policy, "allowed": list(perms.skills.allowed)},
-        "network": {"allowed_ips": list(perms.network.allowed_ips)},
+        "network": {
+            "allowed_ips": list(perms.network.allowed_ips),
+            "allow_private_urls": perms.network.allow_private_urls,
+            "allowed_private_ips": list(perms.network.allowed_private_ips),
+        },
     }
 
 
@@ -178,7 +221,12 @@ class _PermissionsBody(BaseModel):
     channels_allowed_platforms: list[str] = []
     skills_policy: str = "read"
     skills_allowed: list[str] = []
+    # INBOUND: who may call this agent's own CRM endpoint.
     network_allowed_ips: list[str] = []
+    # OUTBOUND: whether/where this agent's own network-facing tools may reach private/internal
+    # addresses. Separate from network_allowed_ips above — do not conflate the two.
+    network_allow_private_urls: bool = False
+    network_allowed_private_ips: list[str] = []
 
 
 def _validate_ip_allowlist(raw_ips: list[str]) -> tuple[str, ...]:
@@ -210,14 +258,23 @@ async def api_admin_put_agent_permissions(request: Request, name: str, body: _Pe
     if body.skills_policy not in ("read", "read_write", "read_write_create"):
         raise _http(400, "skills_policy must be one of: read, read_write, read_write_create")
     allowed_ips = _validate_ip_allowlist(body.network_allowed_ips)
+    allowed_private_ips = _validate_ip_allowlist(body.network_allowed_private_ips)
     perms = AgentPermissions(
         webhooks=WebhookPermissions(can_manage=body.webhooks_can_manage, max=max(0, body.webhooks_max)),
         channels=ChannelPermissions(
             max=max(0, body.channels_max), allowed_platforms=tuple(body.channels_allowed_platforms)),
         skills=SkillPermissions(policy=body.skills_policy, allowed=tuple(body.skills_allowed)),
-        network=NetworkPermissions(allowed_ips=allowed_ips),
+        network=NetworkPermissions(
+            allowed_ips=allowed_ips,
+            allow_private_urls=body.network_allow_private_urls,
+            allowed_private_ips=allowed_private_ips,
+        ),
     )
     write_agent_permissions(profile_dir, perms)
+    # Bridge the OUTBOUND grant into the profile's own config.yaml — permissions.yaml alone
+    # doesn't change what tools/url_safety.py resolves for that profile's process.
+    _sync_outbound_network_permissions(
+        name, allow_private_urls=body.network_allow_private_urls, allowed_private_ips=allowed_private_ips)
     sess = _require_admin(request)
     _log.info("admin %s updated permissions for profile '%s'", sess.user_id, name)
     return _permissions_to_json(perms)

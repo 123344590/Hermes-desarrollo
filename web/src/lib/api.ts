@@ -2315,7 +2315,14 @@ export interface AgentPermissionsJson {
   webhooks: { can_manage: boolean; max: number };
   channels: { max: number; allowed_platforms: string[] };
   skills: { policy: "read" | "read_write" | "read_write_create"; allowed: string[] };
-  network: { allowed_ips: string[] };
+  // `allowed_ips` is INBOUND (who may call this agent's own CRM endpoint).
+  // `allow_private_urls` / `allowed_private_ips` are OUTBOUND (what this agent's own
+  // network-facing tools may reach) — a separate system; do not conflate the two.
+  network: {
+    allowed_ips: string[];
+    allow_private_urls: boolean;
+    allowed_private_ips: string[];
+  };
 }
 
 // Body shape for PUT .../permissions — a flat request mirroring
@@ -2329,6 +2336,8 @@ export interface AgentPermissionsUpdate {
   skills_policy: "read" | "read_write" | "read_write_create";
   skills_allowed: string[];
   network_allowed_ips: string[];
+  network_allow_private_urls: boolean;
+  network_allowed_private_ips: string[];
 }
 
 export interface AdminAgentInfo {

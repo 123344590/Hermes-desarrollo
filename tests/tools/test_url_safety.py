@@ -16,6 +16,7 @@ from tools.url_safety import (
     _SSRFGuardedAsyncNetworkBackend,
     _MAX_SSRF_CONNECT_IPS,
     _resolved_http_connect_ips,
+    _resolved_ip_block_reason,
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
@@ -602,3 +603,85 @@ class TestDeclaredFakeIpSentinelRanges:
                 assert is_safe_url("https://example.com/") is True
         finally:
             _reset_allow_private_cache()
+
+
+class TestAllowedPrivateIpsScope:
+    """``security.allowed_private_ips`` — a scoped per-profile outbound allowlist that OVERRIDES
+    the blunt ``allow_private_urls`` boolean when non-empty. Empty (default) falls back to the
+    prior all-or-nothing behavior unchanged.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        _reset_allow_private_cache()
+        yield
+        _reset_allow_private_cache()
+
+    def _with_allowlist(self, monkeypatch, entries, allow_private_urls=True):
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"security": {
+                "allowed_private_ips": entries,
+                "allow_private_urls": allow_private_urls,
+            }},
+        )
+        _reset_allow_private_cache()
+
+    def test_ip_inside_allowlist_is_allowed(self, monkeypatch):
+        self._with_allowlist(monkeypatch, ["192.168.1.0/24"])
+        with _resolves_to("192.168.1.50"):
+            assert is_safe_url("https://internal-crm.example/") is True
+
+    def test_ip_outside_allowlist_is_blocked_even_with_allow_private_urls_true(self, monkeypatch):
+        """Allowlist non-empty takes precedence over the blunt boolean — a private IP outside
+        the allowlist stays blocked even though allow_private_urls=True is also set."""
+        self._with_allowlist(monkeypatch, ["192.168.1.0/24"], allow_private_urls=True)
+        with _resolves_to("10.0.0.5"):
+            assert is_safe_url("https://other-internal.example/") is False
+
+    def test_empty_allowlist_falls_back_to_blunt_boolean(self, monkeypatch):
+        """Regression guard: an empty allowlist must not change the pre-existing all-or-nothing
+        behavior of security.allow_private_urls."""
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"security": {"allowed_private_ips": [], "allow_private_urls": True}},
+        )
+        _reset_allow_private_cache()
+        with _resolves_to("10.0.0.5"):
+            assert is_safe_url("https://other-internal.example/") is True
+
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"security": {"allowed_private_ips": [], "allow_private_urls": False}},
+        )
+        _reset_allow_private_cache()
+        with _resolves_to("10.0.0.5"):
+            assert is_safe_url("https://other-internal.example/") is False
+
+    def test_metadata_ip_blocked_even_when_inside_an_allowlisted_cidr(self, monkeypatch):
+        """SECURITY-CRITICAL: the always-blocked cloud-metadata floor must never be bypassable by
+        this allowlist, even if the admin's CIDR happens to cover a metadata address (e.g. a
+        broad 169.254.0.0/16 entry). _resolved_ip_block_reason must check _is_always_blocked_ip
+        BEFORE ever consulting the allowlist."""
+        self._with_allowlist(monkeypatch, ["169.254.0.0/16"], allow_private_urls=True)
+        with _resolves_to("169.254.169.254"):
+            assert is_safe_url("http://attacker-controlled.example/") is False
+        # Direct unit check of the ordering invariant itself.
+        import ipaddress as _ipaddress
+        assert _resolved_ip_block_reason(_ipaddress.ip_address("169.254.169.254"), True) == "cloud metadata address"
+
+    def test_allowlist_does_not_widen_reach_beyond_declared_networks(self, monkeypatch):
+        """A profile-scoped allowlist for one internal host must not grant reach to an unrelated
+        private range, even one adjacent to the allowlisted /32."""
+        self._with_allowlist(monkeypatch, ["10.20.30.40/32"], allow_private_urls=True)
+        with _resolves_to("10.20.30.41"):
+            assert is_safe_url("https://neighbor-host.example/") is False
+
+    def test_allowlisted_single_private_ip_reachable_with_boolean_off(self, monkeypatch):
+        """The core scenario from the feature request: grant reach to exactly one internal IP
+        without turning on the blunt allow_private_urls boolean."""
+        self._with_allowlist(monkeypatch, ["10.20.30.40/32"], allow_private_urls=False)
+        with _resolves_to("10.20.30.40"):
+            assert is_safe_url("https://one-internal-host.example/") is True
+        with _resolves_to("10.20.30.41"):
+            assert is_safe_url("https://neighbor-host.example/") is False

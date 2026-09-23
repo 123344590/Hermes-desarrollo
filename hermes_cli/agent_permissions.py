@@ -59,7 +59,24 @@ class NetworkPermissions:
     # Empty = no IP restriction (backward compatible with every profile created before this
     # field existed) — same "empty means unrestricted" convention as ChannelPermissions.
     # allowed_platforms and SkillPermissions.allowed. Entries are individual IPs or CIDR ranges.
+    #
+    # INBOUND: who may call THIS agent's own CRM endpoint (/p/<name>/v1). Separate system from
+    # both fields below — do not confuse the two either in code or in the admin UI.
     allowed_ips: Tuple[str, ...] = ()
+    # OUTBOUND (allow_private_urls / allowed_private_ips, below) vs INBOUND (allowed_ips, above):
+    # these two gate whether the agent's OWN network-facing tools (terminal, url fetch, browser)
+    # may reach private/internal addresses — bridged by the admin write path into that profile's
+    # own config.yaml as security.allow_private_urls / security.allowed_private_ips (see
+    # tools/url_safety.py::_resolve_allow_private_urls / _resolve_allowed_private_ips). Fail-closed
+    # default, same as every other field on this dataclass; a profile with no permissions.yaml yet
+    # must not be able to reach internal/VPN network space.
+    allow_private_urls: bool = False
+    # Scoped OUTBOUND allowlist: when non-empty, the agent's outbound tools may reach ONLY private
+    # IPs/CIDRs listed here, regardless of allow_private_urls — granularity for "this agent may
+    # reach just this one internal IP" rather than all-or-nothing. Empty = no scoped allowlist,
+    # falls back to the blunt allow_private_urls boolean (unchanged prior behavior). Entries are
+    # individual IPs or CIDR ranges, same shape as allowed_ips above.
+    allowed_private_ips: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,7 +93,11 @@ def _unrestricted() -> AgentPermissions:
         webhooks=WebhookPermissions(can_manage=True, max=2**31 - 1),
         channels=ChannelPermissions(max=2**31 - 1, allowed_platforms=()),
         skills=SkillPermissions(policy="read_write_create", allowed=()),
-        network=NetworkPermissions(allowed_ips=()),
+        # allowed_private_ips stays empty here on purpose: allow_private_urls=True already grants
+        # unrestricted outbound private reach for this always-unrestricted profile, so a scoped
+        # allowlist entry would be redundant (and, per the override rule, would actually NARROW
+        # it — the opposite of what "unrestricted" means for this profile).
+        network=NetworkPermissions(allowed_ips=(), allow_private_urls=True, allowed_private_ips=()),
     )
 
 
@@ -184,6 +205,8 @@ def _parse_permissions(raw: dict) -> AgentPermissions:
         ),
         network=NetworkPermissions(
             allowed_ips=_coerce_ip_tuple(network_raw.get("allowed_ips")),
+            allow_private_urls=bool(network_raw.get("allow_private_urls", False)),
+            allowed_private_ips=_coerce_ip_tuple(network_raw.get("allowed_private_ips")),
         ),
     )
 
@@ -249,7 +272,11 @@ def _to_raw(perms: AgentPermissions) -> dict:
         "webhooks": {"can_manage": perms.webhooks.can_manage, "max": perms.webhooks.max},
         "channels": {"max": perms.channels.max, "allowed_platforms": list(perms.channels.allowed_platforms)},
         "skills": {"policy": perms.skills.policy, "allowed": list(perms.skills.allowed)},
-        "network": {"allowed_ips": list(perms.network.allowed_ips)},
+        "network": {
+            "allowed_ips": list(perms.network.allowed_ips),
+            "allow_private_urls": perms.network.allow_private_urls,
+            "allowed_private_ips": list(perms.network.allowed_private_ips),
+        },
     }
 
 

@@ -58,7 +58,11 @@ const AGENT_FIXTURE = {
     webhooks: { can_manage: true, max: 3 },
     channels: { max: 2, allowed_platforms: ["telegram"] },
     skills: { policy: "read_write" as const, allowed: ["web_search"] },
-    network: { allowed_ips: ["10.0.0.0/8"] },
+    network: {
+      allowed_ips: ["10.0.0.0/8"],
+      allow_private_urls: false,
+      allowed_private_ips: [],
+    },
   },
   crm: { url: "http://localhost:8642/p/sales-bot/v1", has_api_key: true },
 };
@@ -124,7 +128,7 @@ describe("AgentsPage", () => {
       webhooks: { can_manage: false, max: 0 },
       channels: { max: 5, allowed_platforms: ["telegram"] },
       skills: { policy: "read_write", allowed: ["web_search"] },
-      network: { allowed_ips: ["10.0.0.0/8"] },
+      network: { allowed_ips: ["10.0.0.0/8"], allow_private_urls: false, allowed_private_ips: [] },
     });
     await renderAgentsPage();
 
@@ -150,6 +154,8 @@ describe("AgentsPage", () => {
       skills_policy: "read_write",
       skills_allowed: ["web_search"],
       network_allowed_ips: ["10.0.0.0/8"],
+      network_allow_private_urls: false,
+      network_allowed_private_ips: [],
     });
   });
 
@@ -186,7 +192,7 @@ describe("AgentsPage", () => {
       webhooks: { can_manage: true, max: 3 },
       channels: { max: 2, allowed_platforms: ["telegram", "discord"] },
       skills: { policy: "read_write", allowed: ["web_search"] },
-      network: { allowed_ips: ["10.0.0.0/8"] },
+      network: { allowed_ips: ["10.0.0.0/8"], allow_private_urls: false, allowed_private_ips: [] },
     });
     await renderAgentsPage();
 
@@ -223,6 +229,65 @@ describe("AgentsPage", () => {
     const label = document.querySelector('label[for="network-ips"]');
     expect(label?.textContent ?? "").toMatch(/incoming|inbound/i);
     expect(label?.textContent ?? "").not.toMatch(/outbound/i);
+  });
+
+  it("round-trips the scoped outbound private-IP allowlist, kept separate from inbound allowed_ips", async () => {
+    apiMocks.getAgents.mockResolvedValue({
+      agents: [
+        {
+          ...AGENT_FIXTURE,
+          permissions: {
+            ...AGENT_FIXTURE.permissions,
+            network: {
+              allowed_ips: ["10.0.0.0/8"],
+              allow_private_urls: true,
+              allowed_private_ips: ["192.168.1.50/32"],
+            },
+          },
+        },
+      ],
+    });
+    apiMocks.updateAgentPermissions.mockResolvedValue({
+      webhooks: { can_manage: true, max: 3 },
+      channels: { max: 2, allowed_platforms: ["telegram"] },
+      skills: { policy: "read_write", allowed: ["web_search"] },
+      network: {
+        allowed_ips: ["10.0.0.0/8"],
+        allow_private_urls: true,
+        allowed_private_ips: ["192.168.1.50/32", "192.168.1.51/32"],
+      },
+    });
+    await renderAgentsPage();
+
+    // Read-only card summary shows the outbound scope distinctly from inbound.
+    expect(document.body.textContent ?? "").toContain("restricted to 192.168.1.50/32");
+
+    click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
+    await waitFor(() => document.querySelector("#network-allowed-private-ips") != null);
+
+    // The outbound checkbox and its nested scoped-IP field are distinct elements from the
+    // inbound allowlist input, and both are present/editable at once.
+    const outboundCheckbox = document.querySelector<HTMLInputElement>(
+      "#network-allow-private-urls",
+    );
+    expect(outboundCheckbox?.checked).toBe(true);
+    expect(document.querySelector("#network-ips")).not.toBeNull();
+
+    setInputValue(
+      document.querySelector<HTMLInputElement>("#network-allowed-private-ips"),
+      "192.168.1.50/32, 192.168.1.51/32",
+    );
+    click(findButtonByText("Save permissions"));
+    await waitFor(() => apiMocks.updateAgentPermissions.mock.calls.length > 0);
+
+    const [, body] = apiMocks.updateAgentPermissions.mock.calls[0] as [
+      string,
+      { network_allowed_ips: string[]; network_allow_private_urls: boolean; network_allowed_private_ips: string[] },
+    ];
+    // Inbound allowlist is untouched by editing the outbound one.
+    expect(body.network_allowed_ips).toEqual(["10.0.0.0/8"]);
+    expect(body.network_allow_private_urls).toBe(true);
+    expect(body.network_allowed_private_ips).toEqual(["192.168.1.50/32", "192.168.1.51/32"]);
   });
 });
 

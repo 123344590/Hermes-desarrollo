@@ -1713,6 +1713,12 @@ DEFAULT_CONFIG = {
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard
         # dials them instead of rejecting them as private. Empty = normal private-address verdict.
         "fake_ip_ranges": [],
+        # Per-profile scoped allowlist of private IPs/CIDRs this profile's OWN outbound network
+        # tools (terminal, url fetch, browser) may reach. Empty (default) = fall back to the blunt
+        # allow_private_urls boolean above; non-empty OVERRIDES it and narrows outbound private
+        # reach to just these ranges. Never excuses cloud metadata addresses — see
+        # tools/url_safety.py::_resolved_ip_block_reason.
+        "allowed_private_ips": [],
         "redact_secrets": True,
         # Persisted acknowledgement for unattended model overrides whose tier lets the vendor train
         # on prompts. The startup guard still warns every run; cost guards are unaffected.

@@ -1,13 +1,16 @@
 """URL safety checks — blocks requests to private/internal network addresses (SSRF).
 
 ``security.allow_private_urls: true`` disables private-IP blocking (DNS that resolves public
-names to private ranges); cloud metadata hostnames/IPs are **always** blocked. A local TUN proxy
-that answers DNS with a fake-ip block (Mihomo/Clash fake-ip, Surge enhanced) declares that block
-in ``security.fake_ip_ranges`` so its sentinel answers are dialable instead of looking private;
-the list is empty by default, so the sentinel stays blocked for everyone else. DNS rebinding
-(TOCTOU) is closed for Hermes-owned httpx paths by ``create_ssrf_safe_[async_]client()``, which
-re-apply the policy at TCP connect and dial the validated IP while preserving Host/SNI. Redirect
-bypass is mitigated by response hooks re-validating each target (``redirect_target_from_response``).
+names to private ranges); cloud metadata hostnames/IPs are **always** blocked. ``security.
+allowed_private_ips`` narrows that further: a non-empty list of IPs/CIDRs scopes outbound private
+reach to just those ranges, overriding the blunt ``allow_private_urls`` boolean (empty list =
+previous all-or-nothing behavior). A local TUN proxy that answers DNS with a fake-ip block
+(Mihomo/Clash fake-ip, Surge enhanced) declares that block in ``security.fake_ip_ranges`` so its
+sentinel answers are dialable instead of looking private; the list is empty by default, so the
+sentinel stays blocked for everyone else. DNS rebinding (TOCTOU) is closed for Hermes-owned httpx
+paths by ``create_ssrf_safe_[async_]client()``, which re-apply the policy at TCP connect and dial
+the validated IP while preserving Host/SNI. Redirect bypass is mitigated by response hooks
+re-validating each target (``redirect_target_from_response``).
 """
 
 import ipaddress
@@ -139,6 +142,7 @@ _FAKE_IP_UNDECLARABLE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
 # Global toggle cache (process lifetime; see _global_allow_private_urls).
 _allow_private_resolved, _cached_allow_private = False, False
 _fake_ip_resolved, _cached_fake_ip_ranges = False, ()
+_allowed_private_ips_resolved, _cached_allowed_private_ips = False, ()
 
 
 def _global_allow_private_urls() -> bool:
@@ -174,10 +178,14 @@ def _resolve_allow_private_urls() -> bool:
 
 
 def _reset_allow_private_cache() -> None:
-    """Reset the cached toggle and the cached fake-ip ranges — only for tests."""
+    """Reset the cached toggle, the cached fake-ip ranges, and the cached private-IP
+    allowlist — only for tests."""
     global _allow_private_resolved, _cached_allow_private, _fake_ip_resolved, _cached_fake_ip_ranges
+    global _allowed_private_ips_resolved, _cached_allowed_private_ips
     _allow_private_resolved = _cached_allow_private = _fake_ip_resolved = False
     _cached_fake_ip_ranges = ()
+    _allowed_private_ips_resolved = False
+    _cached_allowed_private_ips = ()
 
 
 def _resolve_fake_ip_ranges() -> tuple:
@@ -220,6 +228,58 @@ def _global_fake_ip_ranges() -> tuple:
     if not _fake_ip_resolved:
         _fake_ip_resolved, _cached_fake_ip_ranges = True, _resolve_fake_ip_ranges()
     return _cached_fake_ip_ranges
+
+
+def _resolve_allowed_private_ips() -> tuple:
+    """Per-profile scoped allowlist of private IPs/CIDRs this profile's OWN outbound network
+    tools may reach (``security.allowed_private_ips``).
+
+    Empty (the default) means "no scoped allowlist" — ``_resolved_ip_block_reason`` then falls
+    back to the blunt ``allow_private_urls`` boolean, exactly as before this field existed. A
+    non-empty list OVERRIDES that boolean: only IPs inside one of these networks are dialable,
+    everything else private/internal stays blocked. This never excuses cloud-metadata addresses —
+    ``_resolved_ip_block_reason`` checks ``_is_always_blocked_ip`` before ever consulting this.
+
+    Entries are individual IPs or CIDR ranges, same shape/validation precedent as
+    ``NetworkPermissions.allowed_ips`` in ``hermes_cli/agent_permissions.py`` — unparseable
+    entries are dropped (not fatal) on this read path, matching that module's
+    ``_coerce_ip_tuple`` convention; strict validation belongs to the admin write path
+    (``hermes_cli/dashboard_auth/admin_routes.py::_validate_ip_allowlist``).
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+        block = read_raw_config().get("security", {})
+        raw = block.get("allowed_private_ips") if isinstance(block, dict) else None
+    except Exception:
+        return ()  # config unavailable (tests, early import) — keep the secure default
+    entries = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+    networks = []
+    for entry in entries:
+        try:
+            net = ipaddress.ip_network(str(entry).strip(), strict=False)
+        except ValueError:
+            logger.warning("Ignoring unparseable security.allowed_private_ips entry: %r", entry)
+            continue
+        networks.append(net)
+    return tuple(networks)
+
+
+def _global_allowed_private_ips() -> tuple:
+    """Process-lifetime cache with the same profile-scope bypass as ``_global_allow_private_urls``
+    / ``_global_fake_ip_ranges``: a multiplex gateway must not apply the first profile's allowlist
+    to later ones."""
+    global _allowed_private_ips_resolved, _cached_allowed_private_ips
+    if get_hermes_home_override() is not None:
+        return _resolve_allowed_private_ips()
+    if not _allowed_private_ips_resolved:
+        _allowed_private_ips_resolved, _cached_allowed_private_ips = True, _resolve_allowed_private_ips()
+    return _cached_allowed_private_ips
+
+
+def _is_within_allowed_private_ips(ip: _IPAddress) -> bool:
+    """True when *ip* falls inside one of the scoped ``security.allowed_private_ips`` networks."""
+    ip = _embedded_ipv4(ip)
+    return any(ip in net for net in _global_allowed_private_ips())
 
 
 def _normalize_hostname(host: Optional[str]) -> str:
@@ -327,11 +387,29 @@ def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:
 
 
 def _resolved_ip_block_reason(ip: _IPAddress, allow_private: bool) -> Optional[str]:
-    """Why a resolved answer must be rejected, or None if it may be dialed. The metadata floor
-    ignores ``allow_private``; ordinary private/internal classes are blocked only when it is False."""
+    """Why a resolved answer must be rejected, or None if it may be dialed.
+
+    Ordering is load-bearing and MUST NOT change: the metadata floor (``_is_always_blocked_ip``)
+    is checked FIRST and unconditionally — neither ``allow_private`` nor
+    ``security.allowed_private_ips`` can ever excuse a cloud-metadata address. Only once that
+    floor clears does an ordinary private/internal class get evaluated.
+
+    ``security.allowed_private_ips`` (a scoped per-profile allowlist), when non-empty, OVERRIDES
+    the blunt ``allow_private`` boolean for private/internal (non-metadata) addresses: such an
+    address is then dialable only if it falls inside one of the allowlisted networks, regardless
+    of what ``allow_private`` says. An empty allowlist (the default) falls back to the previous
+    blunt-boolean behavior unchanged.
+    """
     if _is_always_blocked_ip(ip):
         return "cloud metadata address"
-    if not allow_private and _is_blocked_ip(ip) and not _is_declared_fake_ip(ip):
+    if _is_declared_fake_ip(ip):
+        return None
+    if not _is_blocked_ip(ip):
+        return None
+    allowed_private_ips = _global_allowed_private_ips()
+    if allowed_private_ips:
+        return None if _is_within_allowed_private_ips(ip) else "private/internal address (not in allowed_private_ips)"
+    if not allow_private:
         return "private/internal address"
     return None
 

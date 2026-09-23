@@ -182,3 +182,80 @@ def test_put_permissions_rejects_invalid_policy_value(tmp_path):
               "channels_allowed_platforms": [], "skills_policy": "godmode", "skills_allowed": []},
     )
     assert r.status_code == 400
+
+
+def test_put_permissions_outbound_private_ips_round_trip_into_permissions_and_config(tmp_path):
+    """network_allow_private_urls / network_allowed_private_ips must land in BOTH the
+    AgentPermissions control file (via the API's own read-back) AND the profile's OWN
+    config.yaml as security.allow_private_urls / security.allowed_private_ips — the bridge
+    tools/url_safety.py actually reads at runtime. Mirrors the existing
+    test_create_agent_provisions_crm_url_and_token config.yaml-content assertion style."""
+    client = TestClient(_build_app(_session("admin")))
+    client.post("/api/admin/agents", json={"name": "crm-outbound"})
+
+    put = client.put(
+        "/api/admin/agents/crm-outbound/permissions",
+        json={
+            "webhooks_can_manage": False, "webhooks_max": 0,
+            "channels_max": 0, "channels_allowed_platforms": [],
+            "skills_policy": "read", "skills_allowed": [],
+            "network_allowed_ips": ["203.0.113.0/24"],
+            "network_allow_private_urls": True,
+            "network_allowed_private_ips": ["10.20.30.40/32", "192.168.1.0/24"],
+        },
+    )
+    assert put.status_code == 200
+    body = put.json()
+    assert body["network"]["allow_private_urls"] is True
+    assert body["network"]["allowed_private_ips"] == ["10.20.30.40/32", "192.168.1.0/24"]
+    assert body["network"]["allowed_ips"] == ["203.0.113.0/24"]
+
+    # GET reflects the same, proving the AgentPermissions control file round-trips it.
+    got = client.get("/api/admin/agents/crm-outbound/permissions")
+    assert got.status_code == 200
+    assert got.json()["network"]["allow_private_urls"] is True
+    assert got.json()["network"]["allowed_private_ips"] == ["10.20.30.40/32", "192.168.1.0/24"]
+
+    # Bridged into the PROFILE'S OWN config.yaml (not the admin's default-profile one) —
+    # this is what tools/url_safety.py actually reads at runtime for that profile's process.
+    profile_config = (tmp_path / ".hermes" / "profiles" / "crm-outbound" / "config.yaml").read_text(
+        encoding="utf-8")
+    assert "allow_private_urls: true" in profile_config
+    assert "10.20.30.40/32" in profile_config
+    assert "192.168.1.0/24" in profile_config
+
+
+def test_put_permissions_rejects_invalid_outbound_private_ip_entry(tmp_path):
+    client = TestClient(_build_app(_session("admin")))
+    client.post("/api/admin/agents", json={"name": "crm-badip"})
+    r = client.put(
+        "/api/admin/agents/crm-badip/permissions",
+        json={
+            "webhooks_can_manage": False, "webhooks_max": 0,
+            "channels_max": 0, "channels_allowed_platforms": [],
+            "skills_policy": "read", "skills_allowed": [],
+            "network_allowed_private_ips": ["not-an-ip"],
+        },
+    )
+    assert r.status_code == 400
+
+
+def test_put_permissions_outbound_defaults_stay_fail_closed(tmp_path):
+    """A PUT that omits the new outbound fields must not accidentally grant outbound private
+    reach — the Pydantic defaults (False / []) must be the fail-closed values, and the bridge
+    write must persist that explicit False rather than leaving it unset (see
+    _sync_outbound_network_permissions's preserve_keys docstring)."""
+    client = TestClient(_build_app(_session("admin")))
+    client.post("/api/admin/agents", json={"name": "crm-default"})
+    put = client.put(
+        "/api/admin/agents/crm-default/permissions",
+        json={"webhooks_can_manage": False, "webhooks_max": 0, "channels_max": 0,
+              "channels_allowed_platforms": [], "skills_policy": "read", "skills_allowed": []},
+    )
+    assert put.status_code == 200
+    assert put.json()["network"]["allow_private_urls"] is False
+    assert put.json()["network"]["allowed_private_ips"] == []
+
+    profile_config = (tmp_path / ".hermes" / "profiles" / "crm-default" / "config.yaml").read_text(
+        encoding="utf-8")
+    assert "allow_private_urls: false" in profile_config

@@ -146,6 +146,8 @@ function permissionsToDraft(agent: AdminAgentInfo): AgentPermissionsUpdate {
     skills_policy: agent.permissions.skills.policy,
     skills_allowed: [...agent.permissions.skills.allowed],
     network_allowed_ips: [...agent.permissions.network.allowed_ips],
+    network_allow_private_urls: agent.permissions.network.allow_private_urls,
+    network_allowed_private_ips: [...agent.permissions.network.allowed_private_ips],
   };
 }
 
@@ -289,8 +291,57 @@ function PermissionsEditor({
         <p className="text-xs text-muted-foreground">
           Allowlists the source IP of INBOUND requests to this agent's own CRM endpoint
           (<code>/p/{"<name>"}/v1</code>). Does not affect this agent's own outbound network
-          access.
+          access — see below.
         </p>
+      </div>
+
+      <div className="grid gap-2 border-t border-border pt-4">
+        <Label htmlFor="network-allow-private-urls">Network — outbound private access</Label>
+        <label
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+          htmlFor="network-allow-private-urls"
+        >
+          <input
+            id="network-allow-private-urls"
+            type="checkbox"
+            checked={draft.network_allow_private_urls}
+            onChange={(e) =>
+              onChange({ ...draft, network_allow_private_urls: e.target.checked })
+            }
+          />
+          Allow this agent's own outbound tools (terminal, URL fetch, browser) to reach
+          private network IPs
+        </label>
+        <p className="text-xs text-muted-foreground">
+          OUTBOUND: what this agent may reach out to, not who may reach it (that's the
+          inbound CRM allowlist above). Cloud metadata addresses (e.g. 169.254.169.254)
+          stay blocked no matter what.
+        </p>
+
+        {draft.network_allow_private_urls && (
+          <div className="grid gap-2 pl-6">
+            <Label htmlFor="network-allowed-private-ips">
+              Restrict outbound access to these private IPs/CIDRs (empty = any private IP
+              allowed)
+            </Label>
+            <Input
+              id="network-allowed-private-ips"
+              placeholder="comma-separated IPs or CIDR ranges"
+              value={draft.network_allowed_private_ips.join(", ")}
+              onChange={(e) =>
+                onChange({
+                  ...draft,
+                  network_allowed_private_ips: csvToList(e.target.value),
+                })
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Narrows the checkbox above to only these ranges instead of any private IP —
+              e.g. one internal CRM host rather than the whole private network. Leave empty
+              to allow any private IP once the checkbox is on.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="flex justify-end gap-2">
@@ -684,6 +735,17 @@ export default function AgentsPage() {
                     </span>
                     <span className="col-span-2 truncate" title="Source IPs allowed to call this agent's CRM endpoint">
                       Inbound CRM access: {p.network.allowed_ips.length ? p.network.allowed_ips.join(", ") : "(unrestricted)"}
+                    </span>
+                    <span
+                      className="col-span-2 truncate"
+                      title="What this agent's own outbound tools (terminal, URL fetch, browser) may reach on private networks"
+                    >
+                      Outbound private access:{" "}
+                      {p.network.allow_private_urls
+                        ? p.network.allowed_private_ips.length
+                          ? `restricted to ${p.network.allowed_private_ips.join(", ")}`
+                          : "any private IP"
+                        : "denied"}
                     </span>
                   </div>
 
