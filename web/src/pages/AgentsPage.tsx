@@ -162,15 +162,26 @@ interface PermissionsEditorProps {
 
 /** Inline editor for one agent's AgentPermissions — the shape PUT
  * /api/admin/agents/{name}/permissions accepts (admin_routes.py::_PermissionsBody). */
+type OutboundMode = "deny" | "allow" | "scoped";
+
 /** Derives the 3-way outbound-access radio state from the two underlying fields, so
  * "checked + non-empty allowlist" reads as one unambiguous mode instead of two booleans an
- * admin has to mentally combine. */
-function outboundMode(draft: {
-  network_allow_private_urls: boolean;
-  network_allowed_private_ips: string[];
-}): "deny" | "allow" | "scoped" {
+ * admin has to mentally combine.
+ *
+ * ``scopedSelected`` breaks the one genuine ambiguity: the moment an admin picks "Allow only
+ * these IPs" but hasn't typed an IP yet, ``network_allowed_private_ips`` is still `[]` —
+ * identical, on the two persisted fields alone, to plain "allow". Without this explicit
+ * override the radio would silently re-derive back to "allow" on that first click and the
+ * option would appear unselectable (the actual bug this override fixes). It is UI-only state,
+ * never sent to the backend — an empty allowlist still means "no restriction" there regardless
+ * of which radio was visually selected on the way to it. */
+function outboundMode(
+  draft: { network_allow_private_urls: boolean; network_allowed_private_ips: string[] },
+  scopedSelected: boolean,
+): OutboundMode {
   if (!draft.network_allow_private_urls) return "deny";
-  return draft.network_allowed_private_ips.length > 0 ? "scoped" : "allow";
+  if (draft.network_allowed_private_ips.length > 0) return "scoped";
+  return scopedSelected ? "scoped" : "allow";
 }
 
 function PermissionsEditor({
@@ -183,6 +194,13 @@ function PermissionsEditor({
 }: PermissionsEditorProps) {
   const csvToList = (v: string) =>
     v.split(",").map((s) => s.trim()).filter(Boolean);
+
+  // See outboundMode()'s docstring: tracks an explicit "scoped" radio pick through the
+  // window where the IP field is still empty, so the radio doesn't appear to un-select
+  // itself on the very click that chose it.
+  const [scopedSelected, setScopedSelected] = useState(
+    draft.network_allow_private_urls && draft.network_allowed_private_ips.length > 0,
+  );
 
   const togglePlatform = (id: string, checked: boolean) => {
     const next = checked
@@ -341,8 +359,9 @@ function PermissionsEditor({
                 id={`network-outbound-${opt.value}`}
                 type="radio"
                 name="network-outbound-mode"
-                checked={outboundMode(draft) === opt.value}
+                checked={outboundMode(draft, scopedSelected) === opt.value}
                 onChange={() => {
+                  setScopedSelected(opt.value === "scoped");
                   if (opt.value === "deny") {
                     onChange({
                       ...draft,
@@ -365,7 +384,7 @@ function PermissionsEditor({
           ))}
         </div>
 
-        {outboundMode(draft) === "scoped" && (
+        {outboundMode(draft, scopedSelected) === "scoped" && (
           <div className="grid gap-2 pl-6">
             <Label htmlFor="network-allowed-private-ips">
               Allowed private IPs/CIDRs

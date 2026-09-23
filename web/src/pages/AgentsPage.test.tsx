@@ -231,6 +231,27 @@ describe("AgentsPage", () => {
     expect(label?.textContent ?? "").not.toMatch(/outbound/i);
   });
 
+  it("selecting the 'scoped' outbound radio stays selected before any IP is typed", async () => {
+    // Regression for a real bug: AGENT_FIXTURE starts in "deny" (allow_private_urls: false,
+    // allowed_private_ips: []). Clicking "scoped" sets allow_private_urls=true but the IP list
+    // is still empty at that instant — outboundMode() must not fall back to reading that as
+    // "allow" and silently un-check the radio the admin just clicked.
+    await renderAgentsPage();
+    click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
+    await waitFor(() => document.querySelector("#network-outbound-scoped") != null);
+
+    const scopedRadio = document.querySelector<HTMLInputElement>("#network-outbound-scoped");
+    const allowRadio = document.querySelector<HTMLInputElement>("#network-outbound-allow");
+    expect(scopedRadio?.checked).toBe(false);
+
+    click(scopedRadio);
+    await waitFor(() => document.querySelector("#network-allowed-private-ips") != null);
+
+    expect(scopedRadio?.checked).toBe(true);
+    expect(allowRadio?.checked).toBe(false);
+    expect(document.querySelector("#network-allowed-private-ips")).not.toBeNull();
+  });
+
   it("round-trips the scoped outbound private-IP allowlist, kept separate from inbound allowed_ips", async () => {
     apiMocks.getAgents.mockResolvedValue({
       agents: [
