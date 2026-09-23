@@ -265,12 +265,13 @@ describe("AgentsPage", () => {
     click(document.querySelector('button[aria-label="Permissions"]') ?? findButtonByText("Permissions"));
     await waitFor(() => document.querySelector("#network-allowed-private-ips") != null);
 
-    // The outbound checkbox and its nested scoped-IP field are distinct elements from the
-    // inbound allowlist input, and both are present/editable at once.
-    const outboundCheckbox = document.querySelector<HTMLInputElement>(
-      "#network-allow-private-urls",
+    // The outbound "scoped" radio and its nested IP field are distinct elements from the
+    // inbound allowlist input, and both are present/editable at once — a non-empty
+    // allowed_private_ips resolves to the "scoped" mode, not the bare "allow" mode.
+    const scopedRadio = document.querySelector<HTMLInputElement>(
+      "#network-outbound-scoped",
     );
-    expect(outboundCheckbox?.checked).toBe(true);
+    expect(scopedRadio?.checked).toBe(true);
     expect(document.querySelector("#network-ips")).not.toBeNull();
 
     setInputValue(

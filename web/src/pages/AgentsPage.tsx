@@ -162,6 +162,17 @@ interface PermissionsEditorProps {
 
 /** Inline editor for one agent's AgentPermissions — the shape PUT
  * /api/admin/agents/{name}/permissions accepts (admin_routes.py::_PermissionsBody). */
+/** Derives the 3-way outbound-access radio state from the two underlying fields, so
+ * "checked + non-empty allowlist" reads as one unambiguous mode instead of two booleans an
+ * admin has to mentally combine. */
+function outboundMode(draft: {
+  network_allow_private_urls: boolean;
+  network_allowed_private_ips: string[];
+}): "deny" | "allow" | "scoped" {
+  if (!draft.network_allow_private_urls) return "deny";
+  return draft.network_allowed_private_ips.length > 0 ? "scoped" : "allow";
+}
+
 function PermissionsEditor({
   draft,
   saving,
@@ -296,37 +307,72 @@ function PermissionsEditor({
       </div>
 
       <div className="grid gap-2 border-t border-border pt-4">
-        <Label htmlFor="network-allow-private-urls">Network — outbound private access</Label>
-        <label
-          className="flex items-center gap-2 text-sm text-muted-foreground"
-          htmlFor="network-allow-private-urls"
-        >
-          <input
-            id="network-allow-private-urls"
-            type="checkbox"
-            checked={draft.network_allow_private_urls}
-            onChange={(e) =>
-              onChange({ ...draft, network_allow_private_urls: e.target.checked })
-            }
-          />
-          Allow this agent's own outbound tools (terminal, URL fetch, browser) to reach
-          private network IPs
-        </label>
+        <Label>Network — outbound private access</Label>
         <p className="text-xs text-muted-foreground">
-          OUTBOUND: what this agent may reach out to, not who may reach it (that's the
-          inbound CRM allowlist above). Cloud metadata addresses (e.g. 169.254.169.254)
-          stay blocked no matter what.
+          OUTBOUND: what this agent's own tools (terminal, URL fetch, browser) may reach out
+          to on private/internal networks — not who may reach IT (that's the inbound CRM
+          allowlist above). Cloud metadata addresses (e.g. 169.254.169.254) stay blocked no
+          matter which option is chosen.
         </p>
 
-        {draft.network_allow_private_urls && (
+        <div className="grid gap-2">
+          {(
+            [
+              {
+                value: "deny",
+                label: "Deny all — no private/internal IPs reachable",
+              },
+              {
+                value: "scoped",
+                label: "Allow only these IPs/CIDRs",
+              },
+              {
+                value: "allow",
+                label: "Allow all private/internal IPs",
+              },
+            ] as const
+          ).map((opt) => (
+            <label
+              key={opt.value}
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+              htmlFor={`network-outbound-${opt.value}`}
+            >
+              <input
+                id={`network-outbound-${opt.value}`}
+                type="radio"
+                name="network-outbound-mode"
+                checked={outboundMode(draft) === opt.value}
+                onChange={() => {
+                  if (opt.value === "deny") {
+                    onChange({
+                      ...draft,
+                      network_allow_private_urls: false,
+                      network_allowed_private_ips: [],
+                    });
+                  } else if (opt.value === "allow") {
+                    onChange({
+                      ...draft,
+                      network_allow_private_urls: true,
+                      network_allowed_private_ips: [],
+                    });
+                  } else {
+                    onChange({ ...draft, network_allow_private_urls: true });
+                  }
+                }}
+              />
+              {opt.label}
+            </label>
+          ))}
+        </div>
+
+        {outboundMode(draft) === "scoped" && (
           <div className="grid gap-2 pl-6">
             <Label htmlFor="network-allowed-private-ips">
-              Restrict outbound access to these private IPs/CIDRs (empty = any private IP
-              allowed)
+              Allowed private IPs/CIDRs
             </Label>
             <Input
               id="network-allowed-private-ips"
-              placeholder="comma-separated IPs or CIDR ranges"
+              placeholder="comma-separated IPs or CIDR ranges, e.g. 10.147.200.3/32"
               value={draft.network_allowed_private_ips.join(", ")}
               onChange={(e) =>
                 onChange({
@@ -336,9 +382,9 @@ function PermissionsEditor({
               }
             />
             <p className="text-xs text-muted-foreground">
-              Narrows the checkbox above to only these ranges instead of any private IP —
-              e.g. one internal CRM host rather than the whole private network. Leave empty
-              to allow any private IP once the checkbox is on.
+              Only these exact ranges are reachable — e.g. one internal CRM host rather than
+              the whole private network. At least one entry is required for this mode to take
+              effect; an empty list here behaves like "Allow all" until you add one.
             </p>
           </div>
         )}
